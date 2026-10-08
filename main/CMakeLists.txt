@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+    PRIV_REQUIRES
+        log
+    REQUIRED_IDF_TARGETS
+        esp32p4
+        esp32s31
+)

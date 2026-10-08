@@ -1,0 +1,44 @@
+* text=auto
+*.sh text eol=lf
+
+# Images
+*.svg text diff
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.bmp binary
+*.webp binary
+*.avif binary
+*.ico binary
+*.tif binary
+*.tiff binary
+
+# Audio and video
+*.wav binary
+*.mp3 binary
+*.ogg binary
+*.flac binary
+*.m4a binary
+*.mp4 binary
+*.webm binary
+*.mov binary
+
+# Archives
+*.zip binary
+*.7z binary
+*.tar binary
+*.gz binary
+*.bz2 binary
+*.xz binary
+*.zst binary
+
+# Fonts
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+
+# Other binary files
+*.bin binary
+*.pdf binary
