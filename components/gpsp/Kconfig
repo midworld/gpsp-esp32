@@ -1,0 +1,55 @@
+# Copyright (C) 2026 Midworld Kim
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+menu "gpSP core"
+
+    config GPSP_AFFINE_PIE
+        bool "PIE affine renderer acceleration"
+        depends on SOC_CPU_HAS_PIE && !ESPEMU
+        depends on !IDF_TARGET_ESP32S31 || !FREERTOS_UNICORE
+        default y if IDF_TARGET_ESP32P4
+        default n
+        help
+            Use XespV instructions for affine rendering. Disabled builds
+            use the scalar renderer. ESP32-S31 requires CPU1 affinity and
+            defaults to disabled.
+
+    config GPSP_ROM_BUFFER_SIZE
+        int "Maximum ROM buffer size (MiB, 0 = auto)"
+        range 0 32
+        default 0
+        help
+            0 selects 4 MiB with up to 16 MiB PSRAM, or 8 MiB with more.
+            Nonzero values set a fixed maximum in 1 MiB blocks. Allocation
+            stops early if there is not enough memory. After a ROM is opened,
+            only the blocks it needs are kept. Larger ROMs load 32 KiB pages
+            from the file as needed.
+
+    config GPSP_RV32_CODE_CHUNK_KIB
+        int "RV32 code cache chunk size (KiB)"
+        range 64 2048
+        default 256
+        help
+            Each code cache starts with one chunk and adds a chunk when
+            the current one is full. Use a power of two that divides the
+            ROM and RAM cache limits.
+
+    config GPSP_RV32_ROM_CACHE_KIB
+        int "RV32 ROM code cache limit (KiB)"
+        range 64 2048
+        default 2048
+        help
+            Largest size of the executable ROM translation cache. It is
+            allocated from executable PSRAM. A full cache at this size
+            is flushed.
+
+    config GPSP_RV32_RAM_CACHE_KIB
+        int "RV32 RAM code cache limit (KiB)"
+        range 64 4096
+        default 2048
+        help
+            Largest size of the executable cache for code run from EWRAM
+            and IWRAM. A full cache at this size flushes both code caches.
+            Some games need more than 1 MiB.
+
+endmenu

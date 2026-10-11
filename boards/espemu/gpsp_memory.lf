@@ -1,0 +1,20 @@
+# Copyright (C) 2026 Midworld Kim
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[scheme:gpsp_extram_bss]
+entries:
+    bss -> extern_ram
+    common -> extern_ram
+
+[mapping:gpsp_large_memory]
+archive: libgpsp.a
+entries:
+    if ESP_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        gba_memory (gpsp_extram_bss)
+        rv32_ram_units (gpsp_extram_bss)
+        cpu:ewram (gpsp_extram_bss)
+        cpu:iwram (gpsp_extram_bss)
+        cpu:vram (gpsp_extram_bss)
+        cpu:memory_map_read (gpsp_extram_bss)
+        sound:sound_buffer (gpsp_extram_bss)
+        video:_ZL17obj_priority_list (gpsp_extram_bss)

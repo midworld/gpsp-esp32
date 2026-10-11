@@ -1,0 +1,155 @@
+# Copyright (C) 2026 Midworld Kim
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+menu "gpSP transport"
+
+    config ESPEMU
+        bool
+        default y
+        help
+            Use virtual Ethernet and the ESP-EMU host address.
+
+    config GPSP_BENCHMARK
+        bool "Emit fixed-frame benchmark results"
+        default n
+        help
+            Measure 64-frame windows from the first retro_run().
+            Wait for the host receiver before running the first frame.
+            Emit frame and detail records after the configured frame count.
+            Without STOP_AFTER_REPORT, keep reporting 64-frame windows.
+
+    config GPSP_BENCHMARK_STOP_AFTER_REPORT
+        bool "Stop after benchmark results"
+        depends on GPSP_BENCHMARK
+        default n
+        help
+            Stop the game and emit BENCH_DONE after the configured report.
+            Leave disabled to keep playing and reporting detail windows.
+
+    config GPSP_BENCHMARK_FRESH_SAVE
+        bool "Ignore cartridge saves during benchmark runs"
+        depends on GPSP_BENCHMARK
+        default n
+        help
+            Start with untouched cartridge save RAM and skip save writes.
+            Existing save files remain available for normal builds.
+
+    config GPSP_CARTRIDGE_AUTOSAVE
+        bool "Automatically load and write cartridge save RAM"
+        default n
+        help
+            Load cartridge save RAM at startup and write changes during play.
+            Leave disabled to use only manual full-state save and load.
+
+    config GPSP_BENCHMARK_FRAMES
+        int "Benchmark frame count"
+        depends on GPSP_BENCHMARK
+        range 64 5120
+        default 5120
+        help
+            Emit 64-frame windows. The last window may be shorter.
+
+    config GPSP_BENCHMARK_CAPTURE_STATE_FRAME
+        int "Save full state after benchmark frame (0 disables)"
+        depends on GPSP_BENCHMARK
+        range 0 GPSP_BENCHMARK_FRAMES
+        default 0
+        help
+            Save a full state after the selected frame for repeat benchmarks.
+
+    config GPSP_BENCHMARK_LOAD_STATE
+        bool "Load full state before benchmark frames"
+        depends on GPSP_BENCHMARK
+        default n
+        help
+            Load the ROM's full state file before the first measured frame.
+
+    config GPSP_BENCHMARK_HOLD_BUTTONS
+        hex "Buttons held during benchmark frames"
+        depends on GPSP_BENCHMARK
+        range 0x0 0xffff
+        default 0x0
+        help
+            RetroPad button mask held on every frame, e.g. 0x40 for left.
+
+    config GPSP_BENCHMARK_JIT_DETAIL
+        bool "Measure RV32 JIT block internals"
+        depends on GPSP_BENCHMARK
+        default y
+        help
+            Count RAM fast paths and time generated code and C helper bridges.
+            This adds work to every measured JIT call.
+
+    config GPSP_BENCHMARK_JIT_LOOKUP
+        bool "Measure RV32 JIT lookup and translation"
+        depends on GPSP_BENCHMARK
+        default y
+        help
+            Split lookup hits, misses, translation time, and cache flushes.
+            This adds work to every measured block lookup.
+
+    config GPSP_BENCHMARK_JIT_MISS_CLASS
+        bool "Classify RV32 JIT lookup misses"
+        depends on GPSP_BENCHMARK_JIT_LOOKUP
+        default y
+        help
+            Count repeated entry PCs and PCs inside prior translated blocks.
+            This keeps a block-range table and slows translation misses.
+
+    config GPSP_BENCHMARK_JIT_CODE_BYTES
+        bool "Count generated RV32 code bytes by purpose"
+        depends on GPSP_BENCHMARK_JIT_MISS_CLASS
+        default y
+        help
+            Count emitted guards, instruction bodies, timing, batch paths,
+            exits, and overlapping translations. Disabled builds omit the
+            counters.
+
+    config GPSP_BENCHMARK_PHASE_WORK
+        bool "Count timer, DMA, and sound work per frame"
+        depends on GPSP_BENCHMARK
+        default y
+        help
+            Count phase entries, requested DMA bytes, and generated sound
+            samples. This adds work to diagnostic benchmark runs.
+
+    config GPSP_BENCHMARK_VIDEO_DETAIL
+        bool "Measure GBA scanline stages"
+        depends on GPSP_BENCHMARK
+        default y
+        help
+            Time scanline setup and drawing by stage. This adds work to every
+            visible scanline and can change benchmark frame times.
+
+    config GPSP_BENCHMARK_INSTRET
+        bool "Count retired instructions per core phase"
+        depends on GPSP_BENCHMARK && IDF_TARGET_ARCH_RISCV
+        default n
+        help
+            Read the minstret CSR at each phase change. Use it where the CSR
+            exists, such as ESP-EMU, to compare generated code by executed
+            instruction count.
+
+    config GPSP_ESPEMU_UNTHROTTLED
+        bool "Run the core without guest-time frame pacing"
+        default n
+        help
+            Run retro_run() continuously for performance measurements.
+            Gameplay timing is not preserved in this mode. The frontend
+            still yields one FreeRTOS tick every 60 frames for watchdog
+            housekeeping.
+
+    config GPSP_ESPEMU_HOST
+        string "Host viewer IPv4 address"
+        depends on ESPEMU
+        default "192.168.4.1"
+        help
+            Address used by the ESP-EMU user network to reach the host.
+
+    config GPSP_ESPEMU_PORT
+        int "Host viewer TCP port"
+        depends on ESPEMU
+        range 1024 65535
+        default 24680
+
+endmenu

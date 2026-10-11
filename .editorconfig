@@ -1,0 +1,16 @@
+root = true
+
+[{*.c,*.h,*.S,*.s,*.cmake,CMakeLists.txt,Kconfig*}]
+indent_style = space
+indent_size = 4
+max_line_length = 100
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+# gpSP core keeps the style of each upstream file.
+[components/gpsp/core/**]
+indent_style = unset
+indent_size = unset
+max_line_length = unset
+trim_trailing_whitespace = unset
+insert_final_newline = unset

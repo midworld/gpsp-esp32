@@ -57,10 +57,12 @@ DerivedData/
 /sdkconfig.jit
 /sdkconfig.jit.old
 /tests/*/build/
+/tests/*/build-*/
+/tests/*/managed_components/
 /tests/*/sdkconfig
 /tests/*/sdkconfig.old
-/tests/rv32-fallback-step/route
 /tools/usb_pad_test/build/
+/tools/usb_pad_test/build-*/
 /tools/usb_pad_test/managed_components/
 /tools/usb_pad_test/sdkconfig
 /tools/usb_pad_test/sdkconfig.old
