@@ -11,6 +11,9 @@ idf_component_register(
     SRCS
         "app_main.c"
         "gpsp_frontend.c"
+        "gpsp_keyboard.c"
+        "gpsp_loader.c"
+        "gpsp_menu.c"
         "gpsp_png.c"
         "gpsp_save.c"
         "gpsp_save_file.c"
@@ -19,6 +22,7 @@ idf_component_register(
         "gpsp_state.c"
         "gpsp_storage.c"
         "gpsp_ui.c"
+        "gpsp_wifi_ui.c"
     PRIV_INCLUDE_DIRS
         "include"
     REQUIRED_IDF_TARGETS

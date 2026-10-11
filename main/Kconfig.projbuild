@@ -195,6 +195,32 @@ menu "gpSP physical network"
 
 endmenu
 
+menu "gpSP SD card"
+    depends on IDF_TARGET_ESP32P4 && !ESPEMU
+
+    config GPSP_SD_CARD
+        bool "Load ROMs from the SD card"
+        default y
+        help
+            Mount the SD card (SDMMC slot 0) at boot. With a card, the ROM
+            is chosen in this order: a file name sent over the console
+            within the wait time, "rom=<name>" in /sdcard/gpsp.cfg, then
+            the ROM in the storage partition.
+
+    config GPSP_SD_ROM_WAIT_MS
+        int "Console wait for a ROM name (ms)"
+        depends on GPSP_SD_CARD
+        range 0 10000
+        default 2000
+
+    config GPSP_SD_LDO_CHAN
+        int "On-chip LDO channel for SD power (-1 for none)"
+        depends on GPSP_SD_CARD
+        range -1 4
+        default 4
+
+endmenu
+
 menu "gpSP LCD"
     depends on IDF_TARGET_ESP32P4 && !ESPEMU
 
@@ -225,6 +251,14 @@ menu "gpSP LCD"
         bool "Rotate by 180 degrees"
         depends on GPSP_LCD
         default n
+
+    config GPSP_MENU
+        bool "In-game menu"
+        depends on GPSP_LCD && !GPSP_BENCHMARK
+        default y
+        help
+            The pad's home button, or Select and Start together, pauses
+            the game and opens a full-screen menu.
 
 endmenu
 

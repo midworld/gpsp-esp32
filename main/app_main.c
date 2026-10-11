@@ -11,6 +11,7 @@
 
 #include "gpsp_board.h"
 #include "gpsp_frontend.h"
+#include "gpsp_menu.h"
 #include "gpsp_settings.h"
 #include "gpsp_storage.h"
 #include "libretro.h"
