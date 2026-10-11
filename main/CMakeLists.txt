@@ -21,10 +21,14 @@ idf_component_register(
         "gpsp_settings.c"
         "gpsp_state.c"
         "gpsp_storage.c"
+        "gpsp_transfer.c"
+        "gpsp_transfer_ui.c"
         "gpsp_ui.c"
         "gpsp_wifi_ui.c"
     PRIV_INCLUDE_DIRS
         "include"
+    EMBED_TXTFILES
+        "transfer.html"
     REQUIRED_IDF_TARGETS
         esp32p4
         esp32s31
@@ -32,6 +36,7 @@ idf_component_register(
         espemu
         esp_driver_sdmmc
         esp_driver_uart
+        esp_http_server
         esp_mm
         esp_timer
         fatfs

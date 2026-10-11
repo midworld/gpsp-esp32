@@ -29,6 +29,7 @@
 #include "gpsp_settings.h"
 #include "gpsp_state.h"
 #include "gpsp_storage.h"
+#include "gpsp_transfer_ui.h"
 #include "gpsp_ui.h"
 #include "gpsp_wifi_ui.h"
 #include "libretro.h"
@@ -99,6 +100,7 @@ enum menu_item
     MENU_ITEM_LOAD,
     MENU_ITEM_RESET,
     MENU_ITEM_GAME_LIST,
+    MENU_ITEM_TRANSFER,
     MENU_ITEM_SETTINGS,
     MENU_ITEM_FRAMESKIP,
     MENU_ITEM_THRESHOLD,
@@ -139,6 +141,7 @@ static const char *const s_item_names[MENU_ITEM_COUNT] = {
     [MENU_ITEM_VOLUME] = "Volume",
     [MENU_ITEM_AUTO_SAVE] = "Auto Save",
     [MENU_ITEM_AUTO_LOAD] = "Auto Load",
+    [MENU_ITEM_TRANSFER] = "File Transfer",
     [MENU_ITEM_SETTINGS] = "Settings",
     [MENU_ITEM_CONTROLS] = "Controls",
     [MENU_ITEM_WIFI] = "Wi-Fi",
@@ -456,6 +459,7 @@ static void menu_build_items(void)
                 (i != MENU_ITEM_VOLUME || speaker) &&
                 (i != MENU_ITEM_THRESHOLD || automatic) &&
                 (i != MENU_ITEM_GAME_LIST || s_game_list) &&
+                (i != MENU_ITEM_TRANSFER || s_card) &&
                 (s_in_game || i > MENU_ITEM_RESET))
             s_items[s_item_count++] = (enum menu_item)i;
     if (s_cursor >= s_item_count)
@@ -992,6 +996,34 @@ enum gpsp_menu_result gpsp_menu_run(bool in_game)
             if (item == MENU_ITEM_LOAD && menu_load())
                 break;
 #if CONFIG_GPSP_SD_CARD
+            if (item == MENU_ITEM_TRANSFER)
+            {
+                bool changed;
+                enum gpsp_ui_exit exit = gpsp_transfer_ui_run(s_pixels, s_frame,
+                        &changed);
+
+                if (exit == GPSP_UI_QUIT)
+                {
+                    result = changed ? GPSP_MENU_QUIT_KEEP_FILES : GPSP_MENU_QUIT;
+                    break;
+                }
+                /* New files of this game take effect from a fresh start. */
+                if (changed)
+                {
+                    gpsp_storage_request_rom(gpsp_storage_rom_path(), false);
+                    result = GPSP_MENU_RELOAD;
+                    break;
+                }
+                if (exit == GPSP_UI_RESUME && s_in_game)
+                    break;
+                /* Uploads may have brought new ROMs. */
+                s_game_list = gpsp_storage_find_roms(NULL, NULL) > 0;
+                menu_build_items();
+                menu_redraw();
+                held = gpsp_board_input_read();
+                repeat_buttons = 0;
+                continue;
+            }
             if (item == MENU_ITEM_GAME_LIST)
             {
                 enum gpsp_loader_result chosen = menu_game_list();

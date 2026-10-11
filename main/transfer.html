@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpSP Files</title>
+<style>
+body { font: 15px/1.4 system-ui, sans-serif; margin: 0 auto; max-width: 720px;
+  padding: 12px; color: #222; background: #fafafa; }
+h1 { font-size: 20px; margin: 0 0 8px; }
+#path a { color: #06c; text-decoration: none; }
+table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+td { padding: 6px 4px; border-bottom: 1px solid #ddd; word-break: break-all; }
+td.size { text-align: right; white-space: nowrap; color: #666; width: 7em; }
+td.ren, td.del { width: 1.5em; text-align: center; }
+td.ren a { color: #06c; text-decoration: none; }
+td.del a { color: #c00; text-decoration: none; }
+a.dir { font-weight: 600; }
+#drop { border: 2px dashed #aaa; border-radius: 8px; padding: 16px;
+  text-align: center; color: #666; }
+#drop.over { border-color: #06c; color: #06c; }
+#log div { margin-top: 4px; }
+progress { width: 100%; }
+</style>
+</head>
+<body>
+<h1>gpSP Files</h1>
+<div id="path"></div>
+<table id="list"></table>
+<div id="drop">Drop files here to upload into this folder, or
+  <input type="file" id="pick" multiple></div>
+<progress id="bar" value="0" max="1" hidden></progress>
+<div id="log"></div>
+<script>
+var dir = "/";
+var queue = [];
+var busy = false;
+var listing = 0;
+
+function url(path) {
+  return path.split("/").map(encodeURIComponent).join("/");
+}
+
+function size(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / 1048576).toFixed(1) + " MB";
+}
+
+function note(text) {
+  var line = document.createElement("div");
+  line.textContent = text;
+  document.getElementById("log").prepend(line);
+}
+
+function link(text, onclick, href) {
+  var a = document.createElement("a");
+  a.textContent = text;
+  a.href = href || "#";
+  if (onclick) a.onclick = function () { onclick(); return false; };
+  return a;
+}
+
+function showPath() {
+  var box = document.getElementById("path");
+  var parts = dir.split("/").filter(Boolean);
+  var at = "/";
+  box.textContent = "";
+  box.append(link("SD card", function () { open("/"); }), " / ");
+  parts.forEach(function (part) {
+    var target = at + part + "/";
+    at = target;
+    box.append(link(part, function () { open(target); }), " / ");
+  });
+}
+
+function open(path) {
+  var request = ++listing;
+  dir = path;
+  showPath();
+  document.getElementById("list").textContent = "";
+  fetch("/api/list?path=" + encodeURIComponent(path)).then(function (r) {
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  }).then(function (entries) {
+    if (request !== listing) return;
+    var table = document.getElementById("list");
+    table.textContent = "";
+    entries.sort(function (a, b) {
+      return (b.dir - a.dir) || a.name.localeCompare(b.name);
+    });
+    entries.forEach(function (entry) {
+      var row = table.insertRow();
+      var name = row.insertCell();
+      var bytes = row.insertCell();
+      var ren = row.insertCell();
+      var del = row.insertCell();
+      bytes.className = "size";
+      ren.className = "ren";
+      del.className = "del";
+      if (entry.dir) {
+        var a = link(entry.name + "/", function () {
+          open(path + entry.name + "/");
+        });
+        a.className = "dir";
+        name.append(a);
+      } else {
+        var file = link(entry.name, null, "/files" + url(path + entry.name));
+        file.download = entry.name;
+        name.append(file);
+        bytes.textContent = size(entry.size);
+        var r = link("\u270e", function () { rename(path, entry.name); });
+        r.title = "Rename";
+        ren.append(r);
+        var x = link("\u2715", function () { remove(path, entry.name); });
+        x.title = "Delete";
+        del.append(x);
+      }
+    });
+    if (!entries.length) table.insertRow().insertCell().textContent = "(empty)";
+  }).catch(function (error) {
+    if (request === listing) note("Listing failed: " + error.message);
+  });
+}
+
+function remove(path, name) {
+  if (!confirm("Delete " + name + "?")) return;
+  fetch("/files" + url(path + name), {
+    method: "DELETE", headers: { "X-gpSP": "1" }
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      note(name + (r.ok ? ": deleted" : ": not deleted (" +
+          (text || r.status) + ")"));
+      open(dir);
+    });
+  }).catch(function (error) {
+    note(name + ": not deleted (" + error.message + ")");
+  });
+}
+
+function rename(path, name) {
+  var to = prompt("New name for " + name, name);
+  if (!to || to === name) return;
+  fetch("/files" + url(path + name), {
+    method: "MOVE",
+    headers: { "X-gpSP": "1", "Destination": "/files" + url(path + to) }
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      note(name + (r.ok ? ": renamed to " + to : ": not renamed (" +
+          (text || r.status) + ")"));
+      open(dir);
+    });
+  }).catch(function (error) {
+    note(name + ": not renamed (" + error.message + ")");
+  });
+}
+
+function next() {
+  var bar = document.getElementById("bar");
+  if (busy || !queue.length) {
+    if (!busy) { bar.hidden = true; open(dir); }
+    return;
+  }
+  var item = queue.shift();
+  var request = new XMLHttpRequest();
+  busy = true;
+  bar.hidden = false;
+  bar.value = 0;
+  request.open("PUT", "/files" + url(item.dir + item.file.name));
+  request.setRequestHeader("X-gpSP", "1");
+  request.upload.onprogress = function (event) {
+    if (event.lengthComputable) bar.value = event.loaded / event.total;
+  };
+  request.onloadend = function () {
+    note(item.file.name + (request.status === 201 ? ": uploaded" :
+        ": failed (" + (request.responseText || request.status) + ")"));
+    busy = false;
+    next();
+  };
+  request.send(item.file);
+}
+
+function upload(files) {
+  for (var i = 0; i < files.length; i++)
+    queue.push({ dir: dir, file: files[i] });
+  next();
+}
+
+var drop = document.getElementById("drop");
+drop.ondragover = function (event) {
+  event.preventDefault();
+  drop.className = "over";
+};
+drop.ondragleave = function () { drop.className = ""; };
+drop.ondrop = function (event) {
+  event.preventDefault();
+  drop.className = "";
+  upload(event.dataTransfer.files);
+};
+document.getElementById("pick").onchange = function (event) {
+  upload(event.target.files);
+  event.target.value = "";
+};
+open("/");
+</script>
+</body>
+</html>

@@ -5,6 +5,7 @@
  */
 
 #include "gpsp_storage.h"
+#include "gpsp_transfer.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -628,6 +629,9 @@ esp_err_t gpsp_storage_mount(void)
     {
         struct stat config_stat;
 
+        result = gpsp_transfer_recover();
+        if (result != ESP_OK)
+            ESP_LOGW(TAG, "Upload recovery failed: %s", esp_err_to_name(result));
         /* Finish a config replacement cut short by a reset. */
         if (stat(GPSP_SD_CONFIG_PATH, &config_stat) != 0 &&
                 stat(GPSP_SD_CONFIG_BACKUP, &config_stat) == 0)
@@ -642,7 +646,8 @@ esp_err_t gpsp_storage_mount(void)
         }
         sd_rom = result == ESP_OK;
 #if GPSP_STORAGE_GAME_LIST
-        /* With no name the menu picks a ROM. */
+        /* With no name the menu picks a ROM, even from an empty card:
+           File Transfer can bring the first one. */
         if (!sd_rom)
         {
             s_rom_path = NULL;
