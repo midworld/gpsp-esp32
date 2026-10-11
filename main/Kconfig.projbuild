@@ -4,8 +4,8 @@
 menu "gpSP transport"
 
     config ESPEMU
-        bool
-        default y
+        bool "Use ESP-EMU backend"
+        default n
         help
             Use virtual Ethernet and the ESP-EMU host address.
 
@@ -151,5 +151,182 @@ menu "gpSP transport"
         depends on ESPEMU
         range 1024 65535
         default 24680
+
+endmenu
+
+menu "gpSP physical network"
+    depends on IDF_TARGET_ESP32P4 && !ESPEMU
+
+    config GPSP_SERVER_HOST
+        string "Frame receiver IPv4 address"
+        default ""
+        help
+            Leave empty to disable frame transmission.
+
+    config GPSP_SERVER_PORT
+        int "Frame receiver TCP port"
+        range 1024 65535
+        default 24680
+
+    config GPSP_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+
+    config GPSP_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config GPSP_WIFI_PREFER_5GHZ
+        bool "Prefer 5 GHz Wi-Fi"
+        depends on SLAVE_SOC_WIFI_SUPPORT_5G
+        default y
+        help
+            Scan all channels and pick a 5 GHz access point for the
+            configured SSID unless it is much weaker than a 2.4 GHz one.
+
+    config GPSP_WIFI_5GHZ_RSSI_BONUS
+        int "5 GHz RSSI bonus (dB)"
+        depends on GPSP_WIFI_PREFER_5GHZ
+        range 0 60
+        default 20
+        help
+            A 5 GHz access point wins while its RSSI is within this many dB
+            of the best 2.4 GHz one.
+
+endmenu
+
+menu "gpSP LCD"
+    depends on IDF_TARGET_ESP32P4 && !ESPEMU
+
+    config GPSP_LCD
+        bool "Show the game on an SPI ST7789 LCD"
+        default n
+        help
+            320x240 ST7789 panel on SPI2: SCLK=20, MOSI=21, CS=5, DC=26,
+            RST=25, BL=32. The 240x160 frame is drawn 1:1 in the center.
+
+    config GPSP_LCD_SPI_MHZ
+        int "SPI clock (MHz)"
+        depends on GPSP_LCD
+        range 10 80
+        default 40
+
+    config GPSP_LCD_BGR
+        bool "Use BGR color order"
+        depends on GPSP_LCD
+        default n
+
+    config GPSP_LCD_INVERT_COLORS
+        bool "Enable panel color inversion"
+        depends on GPSP_LCD
+        default y
+
+    config GPSP_LCD_ROTATE_180
+        bool "Rotate by 180 degrees"
+        depends on GPSP_LCD
+        default n
+
+endmenu
+
+menu "gpSP serial input"
+    depends on IDF_TARGET_ESP32P4 && !ESPEMU && ESP_CONSOLE_UART && !GPSP_BENCHMARK
+
+    config GPSP_SERIAL_INPUT
+        bool "Read buttons from the console UART"
+        default y
+        help
+            Accept the host viewer's input messages on the console UART
+            (espemu-host --serial). Buttons release after 0.5 seconds
+            without a message.
+
+endmenu
+
+menu "gpSP USB gamepad"
+    depends on IDF_TARGET_ESP32P4 && !ESPEMU && !GPSP_BENCHMARK
+
+    config GPSP_USB_PAD
+        bool "Read buttons from a USB gamepad"
+        default n
+        help
+            Gamepad on the P4 Nano USB-A port: XInput (Xbox 360 class),
+            Xbox One, Switch Pro Controller, DualShock 4 or DualSense,
+            wired or through a 2.4 GHz dongle.
+
+    config GPSP_USB_PAD_HID_DUMP
+        bool "Log raw reports of other HID devices"
+        depends on GPSP_USB_PAD
+        default n
+        help
+            Open other HID devices and log each changed report, to work
+            out a new pad's layout. Their buttons are not used. Sticks
+            can flood the console UART, which serial input also uses.
+
+endmenu
+
+menu "gpSP status"
+    depends on IDF_TARGET_ESP32P4 && !ESPEMU
+
+    config GPSP_STATUS
+        bool "Report CPU use, free memory and chip temperature"
+        default y
+        select FREERTOS_GENERATE_RUN_TIME_STATS
+        select FREERTOS_USE_TRACE_FACILITY
+        select FREERTOS_USE_STATS_FORMATTING_FUNCTIONS
+        select FREERTOS_VTASKLIST_INCLUDE_COREID
+        help
+            Logs a STAT line every 2 seconds and shows the values in the
+            LCD borders. The host viewer's F2 prints a per-task table.
+
+endmenu
+
+menu "gpSP cache"
+    depends on IDF_TARGET_ESP32P4 && !ESPEMU
+
+    config GPSP_DCACHE_AUTOLOAD
+        bool "Prefetch PSRAM data into the L1 data cache"
+        depends on SPIRAM
+        default y
+        help
+            Enables L1 data cache autoload over PSRAM on cache misses
+            and hits.
+
+endmenu
+
+menu "gpSP audio"
+    depends on IDF_TARGET_ESP32P4 && !ESPEMU
+
+    config GPSP_AUDIO
+        bool "Play sound on the onboard speaker"
+        default n
+        help
+            ES8311 DAC and amplifier of the P4 Nano. The core makes sound at
+            32,768 Hz and the I2S clock runs at the same rate, so samples
+            only need a mono mix.
+
+    config GPSP_AUDIO_VOLUME_DB
+        int "DAC volume (dB)"
+        depends on GPSP_AUDIO
+        range -60 0
+        default -6
+
+    config GPSP_FRAMESKIP_AUTO
+        bool "Skip drawing frames that fall behind"
+        depends on GPSP_AUDIO && !GPSP_BENCHMARK
+        default n
+        help
+            While the speaker queue runs low, the core emulates frames
+            without drawing them, so game speed holds when frames take
+            too long. At most 30 frames in a row are skipped. This is the
+            default; "frameskip=" in gpsp.cfg overrides it.
+
+    config GPSP_FRAMESKIP_THRESHOLD
+        int "Skip below this speaker queue level (% of target)"
+        depends on GPSP_AUDIO && !GPSP_BENCHMARK
+        range 10 200
+        default 50
+        help
+            Automatic frameskip starts when the speaker queue falls below
+            this share of its 100 ms target. "frameskip_threshold=" in
+            gpsp.cfg overrides it.
 
 endmenu

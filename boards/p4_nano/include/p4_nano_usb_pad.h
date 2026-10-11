@@ -1,0 +1,28 @@
+/* ESP32-P4-NANO USB gamepad input on the high-speed OTG port.
+ *
+ * Copyright (C) 2026 Midworld Kim
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+#ifndef GPSP_P4_NANO_USB_PAD_H
+#define GPSP_P4_NANO_USB_PAD_H
+
+#include <stdint.h>
+
+#include "esp_err.h"
+
+/* Supports XInput (Xbox 360 class), Xbox One, Switch Pro Controller,
+   DualShock 4 and DualSense devices. */
+esp_err_t gpsp_p4_nano_usb_pad_init(void);
+
+/**
+ * Read the attached pad.
+ *
+ * @return A RetroPad bitmask with the home button in bit 16, or 0 without
+ *         a pad.
+ */
+uint32_t gpsp_p4_nano_usb_pad_read(void);
+
+void gpsp_p4_nano_usb_pad_shutdown(void);
+
+#endif /* GPSP_P4_NANO_USB_PAD_H */

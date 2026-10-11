@@ -1,0 +1,856 @@
+/* ESP32-P4-NANO SPI ST7789 LCD output.
+ *
+ * Copyright (C) 2026 Midworld Kim
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+#include "p4_nano_lcd.h"
+
+#include "sdkconfig.h"
+
+#if CONFIG_GPSP_LCD
+
+#include <limits.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "driver/gpio.h"
+#include "driver/spi_master.h"
+#include "esp_heap_caps.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_vendor.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
+#include "gpsp_font.h"
+#include "gpsp_screen.h"
+
+#define LCD_HOST SPI2_HOST
+#define LCD_PIN_SCLK GPIO_NUM_20
+#define LCD_PIN_MOSI GPIO_NUM_21
+#define LCD_PIN_CS GPIO_NUM_5
+#define LCD_PIN_DC GPIO_NUM_26
+#define LCD_PIN_RESET GPIO_NUM_25
+#define LCD_PIN_BL GPIO_NUM_32
+#define LCD_WIDTH 320
+#define LCD_HEIGHT 240
+#define LCD_FRAME_WIDTH 240
+#define LCD_FRAME_HEIGHT 160
+#define LCD_FRAME_BYTES (LCD_FRAME_WIDTH * LCD_FRAME_HEIGHT * 2)
+/* Three buffers: one rendering, one ready and one on the SPI. The core
+   renders straight into them, one row past the visible ones included. */
+#define LCD_BUFFERS 3
+#define LCD_BUFFER_BYTES ((GPSP_SCREEN_BUFFER_BYTES + 63) & ~63u)
+#define LCD_OFFSET_X ((LCD_WIDTH - LCD_FRAME_WIDTH) / 2)
+#define LCD_OFFSET_Y ((LCD_HEIGHT - LCD_FRAME_HEIGHT) / 2)
+
+_Static_assert(LCD_WIDTH >= LCD_FRAME_WIDTH &&
+        LCD_HEIGHT >= LCD_FRAME_HEIGHT, "The panel must fit a GBA frame");
+
+/* Status uses the shared 7x13 font above and below the game frame.
+   Its 280-pixel area is centered like the menu box. */
+#define LCD_STATUS_WIDTH 280
+#define LCD_STATUS_LEFT ((LCD_WIDTH - LCD_STATUS_WIDTH) / 2 + 4)
+#define LCD_STATUS_RIGHT ((LCD_WIDTH + LCD_STATUS_WIDTH) / 2 - 4)
+#define LCD_STATUS_BAND (GPSP_FONT_HEIGHT + 4)
+#define LCD_STATUS (LCD_OFFSET_Y >= LCD_STATUS_BAND && \
+        LCD_WIDTH >= LCD_STATUS_WIDTH)
+#define LCD_STATUS_TOP (LCD_OFFSET_Y - LCD_STATUS_BAND + 2)
+#define LCD_STATUS_BOTTOM (LCD_OFFSET_Y + LCD_FRAME_HEIGHT + 2)
+/* Longest text, labels included. */
+#define LCD_TEXT_MAX 8
+/* Columns from the left edge, and back from the right edge. */
+#define LCD_COLUMN(column) (LCD_STATUS_LEFT + (column) * GPSP_FONT_WIDTH)
+#define LCD_RIGHT_COLUMN(column) \
+    (LCD_STATUS_RIGHT - (column) * GPSP_FONT_WIDTH)
+
+/* Nominal GBA frame rate in tenths. */
+#define LCD_FPS_TENTHS 597
+
+/* Little-endian RGB565. Normal values are light gray; warnings and
+   critical values stand out. */
+#define LCD_COLOR_LABEL 0x8410
+#define LCD_COLOR_GOOD 0xd69a
+#define LCD_COLOR_WARN 0xffe0
+#define LCD_COLOR_BAD 0xf800
+
+/* CPU1 when it exists: CPU0 runs the emulator. */
+#if CONFIG_FREERTOS_UNICORE
+#define LCD_TASK_CORE tskNO_AFFINITY
+#else
+#define LCD_TASK_CORE 1
+#endif
+
+enum lcd_buffer_state
+{
+    LCD_BUFFER_FREE,
+    LCD_BUFFER_WRITING,
+    LCD_BUFFER_READY,
+    LCD_BUFFER_SENDING,
+    /* The UI's backdrop: kept until the UI ends. */
+    LCD_BUFFER_HELD,
+};
+
+static const char *TAG = "gpsp_lcd";
+static esp_lcd_panel_io_handle_t s_io;
+static esp_lcd_panel_handle_t s_panel;
+static uint16_t *s_buffers[LCD_BUFFERS];
+static enum lcd_buffer_state s_state[LCD_BUFFERS];
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t s_done;
+static TaskHandle_t s_task;
+static volatile bool s_stop;
+static bool s_bus;
+static uint16_t *s_text_pixels;
+/* Game frames that reached the panel. */
+static volatile uint32_t s_sent;
+/* Configured frameskip for FPS colors: 0 is off, negative is auto. */
+static volatile int s_frameskip;
+/* Held by whoever drives the SPI: the LCD task or the UI. */
+static SemaphoreHandle_t s_draw_lock;
+/* Last buffer sent to the panel, or -1. */
+static int s_last = -1;
+#if CONFIG_GPSP_MENU
+/* The UI canvas is centered on the panel; a smaller panel crops it. */
+#define LCD_UI_WIDTH 320
+#define LCD_UI_HEIGHT 240
+#define LCD_UI_BYTES (LCD_UI_WIDTH * LCD_UI_HEIGHT * 2)
+#define LCD_UI_SHOWN_WIDTH (LCD_WIDTH < LCD_UI_WIDTH ? LCD_WIDTH : LCD_UI_WIDTH)
+#define LCD_UI_SHOWN_HEIGHT \
+    (LCD_HEIGHT < LCD_UI_HEIGHT ? LCD_HEIGHT : LCD_UI_HEIGHT)
+/* Panel position of the shown part, and its place in the canvas. */
+#define LCD_UI_X ((LCD_WIDTH - LCD_UI_SHOWN_WIDTH) / 2)
+#define LCD_UI_Y ((LCD_HEIGHT - LCD_UI_SHOWN_HEIGHT) / 2)
+#define LCD_UI_CROP_X ((LCD_UI_WIDTH - LCD_UI_SHOWN_WIDTH) / 2)
+#define LCD_UI_CROP_Y ((LCD_UI_HEIGHT - LCD_UI_SHOWN_HEIGHT) / 2)
+/* Rows per transfer: the bus takes at most LCD_FRAME_BYTES. */
+#define LCD_UI_ROWS (LCD_FRAME_BYTES / (LCD_UI_WIDTH * 2))
+static bool s_ui;
+static uint16_t *s_ui_pixels;
+#endif
+
+/* Values in the borders; labels are drawn once at start. */
+enum lcd_field
+{
+    LCD_FIELD_FPS,
+    LCD_FIELD_SPEED,
+    LCD_FIELD_CPU0,
+    LCD_FIELD_CPU1,
+    LCD_FIELD_TEMP,
+    LCD_FIELD_RAM,
+    LCD_FIELD_MIN,
+    LCD_FIELD_PSRAM,
+    LCD_FIELD_PSRAM_SIZE,
+    LCD_FIELD_COUNT,
+};
+
+struct lcd_field_state
+{
+    uint16_t x;
+    uint16_t y;
+    uint8_t chars;
+    bool dirty;
+    uint16_t color;
+    char text[LCD_TEXT_MAX + 1];
+};
+
+/* Top:    CPU  38%  6%  36.5C          FPS 59.7  SPD 100%
+   Bottom: RAM FREE 110K MIN  96K          PS 11.9/32M */
+static struct lcd_field_state s_fields[LCD_FIELD_COUNT] = {
+    [LCD_FIELD_FPS] = {LCD_RIGHT_COLUMN(14), LCD_STATUS_TOP, 4},
+    [LCD_FIELD_SPEED] = {LCD_RIGHT_COLUMN(4), LCD_STATUS_TOP, 4},
+    [LCD_FIELD_CPU0] = {LCD_COLUMN(4), LCD_STATUS_TOP, 4},
+    [LCD_FIELD_CPU1] = {LCD_COLUMN(9), LCD_STATUS_TOP, 4},
+    [LCD_FIELD_TEMP] = {LCD_COLUMN(14), LCD_STATUS_TOP, 5},
+    [LCD_FIELD_RAM] = {LCD_COLUMN(9), LCD_STATUS_BOTTOM, 4},
+    [LCD_FIELD_MIN] = {LCD_COLUMN(18), LCD_STATUS_BOTTOM, 4},
+    [LCD_FIELD_PSRAM] = {LCD_RIGHT_COLUMN(8), LCD_STATUS_BOTTOM, 4},
+    [LCD_FIELD_PSRAM_SIZE] = {LCD_RIGHT_COLUMN(4), LCD_STATUS_BOTTOM, 4},
+};
+
+static bool gpsp_lcd_transfer_done(esp_lcd_panel_io_handle_t io,
+        esp_lcd_panel_io_event_data_t *event, void *user_ctx)
+{
+    BaseType_t woken = pdFALSE;
+
+    (void)io;
+    (void)event;
+    (void)user_ctx;
+    xSemaphoreGiveFromISR(s_done, &woken);
+    /* The SPI panel IO ignores the return value. */
+    if (woken == pdTRUE)
+        portYIELD_FROM_ISR();
+    return woken == pdTRUE;
+}
+
+/* First buffer in the given state, or -1. Call with s_lock held. */
+static int gpsp_lcd_find(enum lcd_buffer_state state)
+{
+    for (int i = 0; i < LCD_BUFFERS; i++)
+        if (s_state[i] == state)
+            return i;
+    return -1;
+}
+
+/* Waits for the transfer only if it was queued. */
+static bool gpsp_lcd_draw(int x0, int y0, int x1, int y1, const void *pixels)
+{
+    esp_err_t result = esp_lcd_panel_draw_bitmap(s_panel, x0, y0, x1, y1,
+            pixels);
+
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "LCD draw failed: %s", esp_err_to_name(result));
+        return false;
+    }
+    xSemaphoreTake(s_done, portMAX_DELAY);
+    return true;
+}
+
+/* Clears the whole panel with buffer 0, as many rows as it holds. */
+static void gpsp_lcd_clear(void)
+{
+    const int rows = LCD_FRAME_BYTES / (LCD_WIDTH * 2);
+
+    memset(s_buffers[0], 0, LCD_FRAME_BYTES);
+    for (int y = 0; y < LCD_HEIGHT; y += rows)
+        gpsp_lcd_draw(0, y, LCD_WIDTH, y + rows < LCD_HEIGHT ?
+                y + rows : LCD_HEIGHT, s_buffers[0]);
+}
+
+/* Draws text at (x, y) in one color; the cells clear what was there. */
+static bool gpsp_lcd_draw_text(int x, int y, const char *text, int chars,
+        uint16_t color)
+{
+    int width = chars * GPSP_FONT_WIDTH;
+
+    if (chars > LCD_TEXT_MAX)
+        return false;
+    memset(s_text_pixels, 0, width * GPSP_FONT_HEIGHT * 2);
+    for (int c = 0; c < chars && text[c]; c++)
+    {
+        const uint8_t *glyph = gpsp_font_glyph(text[c]);
+
+        for (int row = 0; row < GPSP_FONT_HEIGHT; row++)
+            for (int column = 0; column < GPSP_FONT_WIDTH; column++)
+                if (glyph[row] >> column & 1)
+                    s_text_pixels[row * width + c * GPSP_FONT_WIDTH + column] =
+                            color;
+    }
+    return gpsp_lcd_draw(x, y, x + width, y + GPSP_FONT_HEIGHT,
+            s_text_pixels);
+}
+
+static void gpsp_lcd_set_field(enum lcd_field field, const char *text,
+        uint16_t color)
+{
+    struct lcd_field_state *state = &s_fields[field];
+
+    portENTER_CRITICAL(&s_lock);
+    if (strncmp(state->text, text, LCD_TEXT_MAX) || state->color != color)
+    {
+        strlcpy(state->text, text, sizeof(state->text));
+        state->color = color;
+        state->dirty = true;
+    }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+/* Sends one changed field; true only after a successful draw. */
+static bool gpsp_lcd_send_field(void)
+{
+    struct lcd_field_state field;
+    int field_index = 0;
+    bool found = false;
+
+    portENTER_CRITICAL(&s_lock);
+    for (int i = 0; i < LCD_FIELD_COUNT && !found; i++)
+        if (s_fields[i].dirty)
+        {
+            s_fields[i].dirty = false;
+            field = s_fields[i];
+            field_index = i;
+            found = true;
+        }
+    portEXIT_CRITICAL(&s_lock);
+
+    if (!found || !LCD_STATUS)
+        return false;
+    /* A failed draw stays pending even if the value does not change. */
+    if (!gpsp_lcd_draw_text(field.x, field.y, field.text, field.chars,
+            field.color))
+    {
+        portENTER_CRITICAL(&s_lock);
+        s_fields[field_index].dirty = true;
+        portEXIT_CRITICAL(&s_lock);
+        return false;
+    }
+    return true;
+}
+
+static uint16_t gpsp_lcd_level(unsigned value, unsigned warn, unsigned bad,
+        bool high_is_bad)
+{
+    if (high_is_bad)
+        return value >= bad ? LCD_COLOR_BAD :
+                value >= warn ? LCD_COLOR_WARN : LCD_COLOR_GOOD;
+    return value < bad ? LCD_COLOR_BAD :
+            value < warn ? LCD_COLOR_WARN : LCD_COLOR_GOOD;
+}
+
+#if CONFIG_GPSP_STATUS
+/* Fixed frameskip lowers the expected FPS and warning thresholds. */
+static void gpsp_lcd_set_fps(unsigned tenths)
+{
+    char text[LCD_TEXT_MAX + 1];
+    int frameskip = s_frameskip;
+    unsigned expected = frameskip > 0 ?
+            LCD_FPS_TENTHS / (unsigned)(frameskip + 1) : LCD_FPS_TENTHS;
+    unsigned warn = frameskip > 0 ? expected * 97 / 100 : 580;
+    unsigned bad = frameskip > 0 ? expected * 84 / 100 : 500;
+
+    if (tenths > 999)
+        tenths = 999;
+    snprintf(text, sizeof(text), "%2u.%u", tenths / 10, tenths % 10);
+    gpsp_lcd_set_field(LCD_FIELD_FPS, text,
+            gpsp_lcd_level(tenths, warn, bad, false));
+}
+#endif
+
+static void gpsp_lcd_draw_labels(void)
+{
+    if (!LCD_STATUS)
+        return;
+#if CONFIG_GPSP_STATUS
+    gpsp_lcd_draw_text(LCD_RIGHT_COLUMN(18), LCD_STATUS_TOP, "FPS", 3,
+            LCD_COLOR_LABEL);
+    gpsp_lcd_draw_text(LCD_COLUMN(0), LCD_STATUS_TOP, "CPU", 3,
+            LCD_COLOR_LABEL);
+    gpsp_lcd_draw_text(LCD_RIGHT_COLUMN(8), LCD_STATUS_TOP, "SPD", 3,
+            LCD_COLOR_LABEL);
+    gpsp_lcd_draw_text(LCD_COLUMN(0), LCD_STATUS_BOTTOM, "RAM FREE", 8,
+            LCD_COLOR_LABEL);
+    gpsp_lcd_draw_text(LCD_COLUMN(14), LCD_STATUS_BOTTOM, "MIN", 3,
+            LCD_COLOR_LABEL);
+    gpsp_lcd_draw_text(LCD_RIGHT_COLUMN(11), LCD_STATUS_BOTTOM, "PS", 2,
+            LCD_COLOR_LABEL);
+#endif
+}
+
+/* Samples sent frames at intervals of at least one second. */
+static void gpsp_lcd_update_fps(int64_t *start_us, uint32_t *start_frames)
+{
+#if CONFIG_GPSP_STATUS
+    int64_t now_us = esp_timer_get_time();
+    uint32_t frames = s_sent;
+
+    if (now_us - *start_us < 1000000)
+        return;
+    gpsp_lcd_set_fps((unsigned)((uint64_t)(frames - *start_frames) *
+            10000000u / (uint64_t)(now_us - *start_us)));
+    *start_us = now_us;
+    *start_frames = frames;
+#else
+    (void)start_us;
+    (void)start_frames;
+#endif
+}
+
+/* Sends the newest ready buffer; the emulator never waits for the SPI. */
+static void gpsp_lcd_task(void *arg)
+{
+    int64_t fps_start_us = esp_timer_get_time();
+    uint32_t fps_start_frames = s_sent;
+
+    (void)arg;
+
+    while (!s_stop)
+    {
+        int index = -1;
+
+        /* Without frames the status still updates, e.g. FPS falls to 0. */
+        if (!ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000)))
+        {
+            gpsp_lcd_update_fps(&fps_start_us, &fps_start_frames);
+            xSemaphoreTake(s_draw_lock, portMAX_DELAY);
+#if CONFIG_GPSP_MENU
+            if (!s_ui)
+#endif
+                while (!s_stop && gpsp_lcd_send_field())
+                    ;
+            xSemaphoreGive(s_draw_lock);
+            continue;
+        }
+        for (;;)
+        {
+            xSemaphoreTake(s_draw_lock, portMAX_DELAY);
+            portENTER_CRITICAL(&s_lock);
+#if CONFIG_GPSP_MENU
+            index = s_ui ? -1 : gpsp_lcd_find(LCD_BUFFER_READY);
+#else
+            index = gpsp_lcd_find(LCD_BUFFER_READY);
+#endif
+            if (index >= 0)
+                s_state[index] = LCD_BUFFER_SENDING;
+            portEXIT_CRITICAL(&s_lock);
+            if (index < 0 || s_stop)
+            {
+                xSemaphoreGive(s_draw_lock);
+                break;
+            }
+
+            bool sent = gpsp_lcd_draw(LCD_OFFSET_X, LCD_OFFSET_Y,
+                    LCD_OFFSET_X + LCD_FRAME_WIDTH,
+                    LCD_OFFSET_Y + LCD_FRAME_HEIGHT, s_buffers[index]);
+
+            portENTER_CRITICAL(&s_lock);
+            s_state[index] = LCD_BUFFER_FREE;
+            s_last = index;
+            portEXIT_CRITICAL(&s_lock);
+            if (sent)
+                s_sent++;
+            /* Frames may keep coming without a break out of this loop. */
+            gpsp_lcd_update_fps(&fps_start_us, &fps_start_frames);
+
+            /* Send only one status field before the next game frame. */
+            gpsp_lcd_send_field();
+            xSemaphoreGive(s_draw_lock);
+        }
+    }
+
+    s_task = NULL;
+    vTaskDelete(NULL);
+}
+
+esp_err_t gpsp_p4_nano_lcd_init(void)
+{
+    const gpio_config_t backlight_config = {
+        .pin_bit_mask = 1ULL << LCD_PIN_BL,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    const spi_bus_config_t bus_config = {
+        .sclk_io_num = LCD_PIN_SCLK,
+        .mosi_io_num = LCD_PIN_MOSI,
+        .miso_io_num = -1,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = LCD_FRAME_BYTES,
+    };
+    const esp_lcd_panel_io_spi_config_t io_config = {
+        .cs_gpio_num = LCD_PIN_CS,
+        .dc_gpio_num = LCD_PIN_DC,
+        .spi_mode = 0,
+        .pclk_hz = CONFIG_GPSP_LCD_SPI_MHZ * 1000000u,
+        .trans_queue_depth = 2,
+        .on_color_trans_done = gpsp_lcd_transfer_done,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        /* Frames stay in PSRAM; DMA reads them without a bounce buffer. */
+        .flags.psram_dma_direct = 1,
+    };
+    const esp_lcd_panel_dev_config_t panel_config = {
+        .reset_gpio_num = LCD_PIN_RESET,
+#if CONFIG_GPSP_LCD_BGR
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
+#else
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+#endif
+        /* The panel takes gpSP's little-endian RGB565 as is. */
+        .data_endian = LCD_RGB_DATA_ENDIAN_LITTLE,
+        .bits_per_pixel = 16,
+    };
+    esp_err_t result;
+
+    s_done = xSemaphoreCreateBinary();
+    s_draw_lock = xSemaphoreCreateMutex();
+    for (int i = 0; i < LCD_BUFFERS; i++)
+    {
+        /* Cache-line alignment lets the SPI DMA use the buffer directly. */
+        s_buffers[i] = heap_caps_aligned_alloc(64, LCD_BUFFER_BYTES,
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+        s_state[i] = LCD_BUFFER_FREE;
+    }
+    s_text_pixels = heap_caps_aligned_alloc(64,
+            LCD_TEXT_MAX * GPSP_FONT_WIDTH * GPSP_FONT_HEIGHT * 2,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    if (!s_done || !s_draw_lock || !s_buffers[0] || !s_buffers[1] || !s_buffers[2] ||
+            !s_text_pixels)
+    {
+        gpsp_p4_nano_lcd_shutdown();
+        return ESP_ERR_NO_MEM;
+    }
+
+    result = gpio_config(&backlight_config);
+    if (result == ESP_OK)
+        result = gpio_set_level(LCD_PIN_BL, 0);
+    if (result == ESP_OK)
+        result = spi_bus_initialize(LCD_HOST, &bus_config, SPI_DMA_CH_AUTO);
+    s_bus = result == ESP_OK;
+    if (result == ESP_OK)
+        result = esp_lcd_new_panel_io_spi(LCD_HOST, &io_config, &s_io);
+    if (result == ESP_OK)
+        result = esp_lcd_new_panel_st7789(s_io, &panel_config, &s_panel);
+    if (result == ESP_OK)
+        result = esp_lcd_panel_reset(s_panel);
+    if (result == ESP_OK)
+        result = esp_lcd_panel_init(s_panel);
+    if (result == ESP_OK)
+        result = esp_lcd_panel_swap_xy(s_panel, true);
+    if (result == ESP_OK)
+#if CONFIG_GPSP_LCD_ROTATE_180
+        result = esp_lcd_panel_mirror(s_panel, false, true);
+#else
+        result = esp_lcd_panel_mirror(s_panel, true, false);
+#endif
+    if (result == ESP_OK)
+#if CONFIG_GPSP_LCD_INVERT_COLORS
+        result = esp_lcd_panel_invert_color(s_panel, true);
+#else
+        result = esp_lcd_panel_invert_color(s_panel, false);
+#endif
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "LCD init failed: %s", esp_err_to_name(result));
+        gpsp_p4_nano_lcd_shutdown();
+        return result;
+    }
+
+    gpsp_lcd_clear();
+    gpsp_lcd_draw_labels();
+    esp_lcd_panel_disp_on_off(s_panel, true);
+    gpio_set_level(LCD_PIN_BL, 1);
+
+    s_stop = false;
+    if (xTaskCreatePinnedToCore(gpsp_lcd_task, "gpsp_lcd", 3072, NULL,
+            tskIDLE_PRIORITY + 5, &s_task, LCD_TASK_CORE) != pdPASS)
+    {
+        gpsp_p4_nano_lcd_shutdown();
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "ST7789 %ux%u at (%u,%u), SPI %u MHz", LCD_FRAME_WIDTH,
+            LCD_FRAME_HEIGHT, LCD_OFFSET_X, LCD_OFFSET_Y,
+            CONFIG_GPSP_LCD_SPI_MHZ);
+    return ESP_OK;
+}
+
+bool gpsp_p4_nano_lcd_present(const uint16_t *pixels, unsigned width,
+        unsigned height, size_t pitch)
+{
+    int index = -1;
+
+    if (!s_task || width != LCD_FRAME_WIDTH || height != LCD_FRAME_HEIGHT)
+        return false;
+
+    portENTER_CRITICAL(&s_lock);
+    for (int i = 0; i < LCD_BUFFERS; i++)
+        if (s_buffers[i] == pixels && s_state[i] == LCD_BUFFER_WRITING)
+            index = i;
+    portEXIT_CRITICAL(&s_lock);
+
+    /* A frame from the core's own buffer (the first one) is copied. */
+    if (index < 0)
+    {
+        portENTER_CRITICAL(&s_lock);
+        index = gpsp_lcd_find(LCD_BUFFER_FREE);
+        if (index >= 0)
+            s_state[index] = LCD_BUFFER_WRITING;
+        portEXIT_CRITICAL(&s_lock);
+        if (index < 0)
+            return false;
+        for (unsigned y = 0; y < height; y++)
+            memcpy(s_buffers[index] + y * LCD_FRAME_WIDTH,
+                    (const uint8_t *)pixels + y * pitch, LCD_FRAME_WIDTH * 2);
+    }
+
+    /* Keep one ready frame: an older one would be sent after this one. */
+    portENTER_CRITICAL(&s_lock);
+    for (int i = 0; i < LCD_BUFFERS; i++)
+        if (i != index && s_state[i] == LCD_BUFFER_READY)
+            s_state[i] = LCD_BUFFER_FREE;
+    s_state[index] = LCD_BUFFER_READY;
+    portEXIT_CRITICAL(&s_lock);
+    xTaskNotifyGive(s_task);
+    return true;
+}
+
+/* With one buffer ready and one sending, the third is always free here. */
+uint16_t *gpsp_p4_nano_lcd_next_buffer(void)
+{
+    int index;
+
+    if (!s_task)
+        return NULL;
+    portENTER_CRITICAL(&s_lock);
+    index = gpsp_lcd_find(LCD_BUFFER_FREE);
+    if (index >= 0)
+        s_state[index] = LCD_BUFFER_WRITING;
+    portEXIT_CRITICAL(&s_lock);
+    return index >= 0 ? s_buffers[index] : NULL;
+}
+
+void gpsp_p4_nano_lcd_frameskip(int frameskip)
+{
+    s_frameskip = frameskip;
+}
+
+void gpsp_p4_nano_lcd_status(unsigned cpu0, unsigned cpu1, int temp_tenths,
+        unsigned speed, unsigned ram_kib, unsigned min_kib,
+        unsigned psram_used_tenths, unsigned psram_mib)
+{
+    char text[LCD_TEXT_MAX + 3];
+    unsigned psram_free_tenths;
+
+    if (!s_task)
+        return;
+    snprintf(text, sizeof(text), "%3u%%", speed > 999 ? 999 : speed);
+    gpsp_lcd_set_field(LCD_FIELD_SPEED, text,
+            gpsp_lcd_level(speed, 97, 84, false));
+    snprintf(text, sizeof(text), "%3u%%", cpu0 > 100 ? 100 : cpu0);
+    gpsp_lcd_set_field(LCD_FIELD_CPU0, text, gpsp_lcd_level(cpu0, 70, 90, true));
+    snprintf(text, sizeof(text), "%3u%%", cpu1 > 100 ? 100 : cpu1);
+    gpsp_lcd_set_field(LCD_FIELD_CPU1, text, gpsp_lcd_level(cpu1, 70, 90, true));
+    if (temp_tenths == INT_MIN)
+        gpsp_lcd_set_field(LCD_FIELD_TEMP, "--.-C", LCD_COLOR_GOOD);
+    else
+    {
+        if (temp_tenths < 0)
+            temp_tenths = 0;
+        if (temp_tenths > 999)
+            temp_tenths = 999;
+        snprintf(text, sizeof(text), "%2d.%dC", temp_tenths / 10,
+                temp_tenths % 10);
+        gpsp_lcd_set_field(LCD_FIELD_TEMP, text,
+                gpsp_lcd_level((unsigned)temp_tenths, 600, 750, true));
+    }
+    snprintf(text, sizeof(text), "%3uK", ram_kib > 999 ? 999 : ram_kib);
+    gpsp_lcd_set_field(LCD_FIELD_RAM, text, gpsp_lcd_level(ram_kib, 64, 32, false));
+    snprintf(text, sizeof(text), "%3uK", min_kib > 999 ? 999 : min_kib);
+    gpsp_lcd_set_field(LCD_FIELD_MIN, text, gpsp_lcd_level(min_kib, 64, 32, false));
+    if (psram_mib > 99)
+        psram_mib = 99;
+    if (psram_used_tenths > psram_mib * 10)
+        psram_used_tenths = psram_mib * 10;
+    /* Used against the chip size; colors follow what is left. */
+    psram_free_tenths = psram_mib * 10 - psram_used_tenths;
+    snprintf(text, sizeof(text), "%2u.%u", psram_used_tenths / 10,
+            psram_used_tenths % 10);
+    gpsp_lcd_set_field(LCD_FIELD_PSRAM, text,
+            gpsp_lcd_level(psram_free_tenths, 40, 10, false));
+    snprintf(text, sizeof(text), "/%uM", psram_mib);
+    gpsp_lcd_set_field(LCD_FIELD_PSRAM_SIZE, text, LCD_COLOR_LABEL);
+}
+
+#if CONFIG_GPSP_MENU
+bool gpsp_p4_nano_lcd_ui_begin(uint16_t **pixels, const uint16_t **frame)
+{
+    int index;
+
+    *pixels = NULL;
+    *frame = NULL;
+    if (!s_task)
+        return false;
+    if (!s_ui_pixels)
+        s_ui_pixels = heap_caps_aligned_alloc(64, LCD_UI_BYTES,
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    if (!s_ui_pixels)
+        return false;
+
+    portENTER_CRITICAL(&s_lock);
+    s_ui = true;
+    portEXIT_CRITICAL(&s_lock);
+    /* Waits for a frame on the SPI; the task then sends no more. */
+    xSemaphoreTake(s_draw_lock, portMAX_DELAY);
+    portENTER_CRITICAL(&s_lock);
+    index = gpsp_lcd_find(LCD_BUFFER_READY);
+    if (index < 0 && s_last >= 0 && s_state[s_last] == LCD_BUFFER_FREE)
+        index = s_last;
+    if (index >= 0)
+        s_state[index] = LCD_BUFFER_HELD;
+    portEXIT_CRITICAL(&s_lock);
+    xSemaphoreGive(s_draw_lock);
+
+    *pixels = s_ui_pixels;
+    if (index >= 0)
+        *frame = s_buffers[index];
+    return true;
+}
+
+void gpsp_p4_nano_lcd_ui_draw(unsigned y0, unsigned y1)
+{
+    if (!s_ui || y0 >= y1 || y1 > LCD_UI_HEIGHT)
+        return;
+#if LCD_HEIGHT < LCD_UI_HEIGHT
+    /* Only the rows the panel shows. */
+    if (y0 < LCD_UI_CROP_Y)
+        y0 = LCD_UI_CROP_Y;
+    if (y1 > LCD_UI_CROP_Y + LCD_UI_SHOWN_HEIGHT)
+        y1 = LCD_UI_CROP_Y + LCD_UI_SHOWN_HEIGHT;
+    if (y0 >= y1)
+        return;
+#endif
+    xSemaphoreTake(s_draw_lock, portMAX_DELAY);
+#if LCD_WIDTH >= LCD_UI_WIDTH
+    for (unsigned y = y0; y < y1; y += LCD_UI_ROWS)
+    {
+        unsigned end = y + LCD_UI_ROWS < y1 ? y + LCD_UI_ROWS : y1;
+
+        gpsp_lcd_draw(LCD_UI_X, LCD_UI_Y + y - LCD_UI_CROP_Y,
+                LCD_UI_X + LCD_UI_WIDTH, LCD_UI_Y + end - LCD_UI_CROP_Y,
+                s_ui_pixels + y * LCD_UI_WIDTH);
+    }
+#else
+    /* Cropped rows are not contiguous: send them one by one. */
+    for (unsigned y = y0; y < y1; y++)
+        gpsp_lcd_draw(0, LCD_UI_Y + y - LCD_UI_CROP_Y, LCD_WIDTH,
+                LCD_UI_Y + y + 1 - LCD_UI_CROP_Y,
+                s_ui_pixels + y * LCD_UI_WIDTH + LCD_UI_CROP_X);
+#endif
+    xSemaphoreGive(s_draw_lock);
+}
+
+void gpsp_p4_nano_lcd_ui_end(void)
+{
+    if (!s_ui)
+        return;
+    memset(s_ui_pixels, 0, LCD_UI_BYTES);
+    gpsp_p4_nano_lcd_ui_draw(0, LCD_UI_HEIGHT);
+
+    xSemaphoreTake(s_draw_lock, portMAX_DELAY);
+    gpsp_lcd_draw_labels();
+    portENTER_CRITICAL(&s_lock);
+    for (int i = 0; i < LCD_FIELD_COUNT; i++)
+        s_fields[i].dirty = s_fields[i].text[0] != '\0';
+    for (int i = 0; i < LCD_BUFFERS; i++)
+        if (s_state[i] == LCD_BUFFER_HELD)
+            s_state[i] = LCD_BUFFER_FREE;
+    s_ui = false;
+    portEXIT_CRITICAL(&s_lock);
+    xSemaphoreGive(s_draw_lock);
+}
+#endif
+
+void gpsp_p4_nano_lcd_shutdown(void)
+{
+    if (s_task)
+    {
+        s_stop = true;
+        xTaskNotifyGive(s_task);
+        while (s_task)
+            vTaskDelay(1);
+    }
+    if (s_panel)
+    {
+        /* Some modules keep the backlight on whatever BL says: blank the
+           panel too, so the last frame does not stay up. */
+        if (s_buffers[0] && s_done)
+            gpsp_lcd_clear();
+        esp_lcd_panel_disp_on_off(s_panel, false);
+        gpio_set_level(LCD_PIN_BL, 0);
+        esp_lcd_panel_del(s_panel);
+        s_panel = NULL;
+    }
+    if (s_io)
+    {
+        esp_lcd_panel_io_del(s_io);
+        s_io = NULL;
+    }
+    if (s_bus)
+    {
+        spi_bus_free(LCD_HOST);
+        s_bus = false;
+    }
+    for (int i = 0; i < LCD_BUFFERS; i++)
+    {
+        heap_caps_free(s_buffers[i]);
+        s_buffers[i] = NULL;
+    }
+    heap_caps_free(s_text_pixels);
+    s_text_pixels = NULL;
+#if CONFIG_GPSP_MENU
+    heap_caps_free(s_ui_pixels);
+    s_ui_pixels = NULL;
+    s_ui = false;
+#endif
+    s_last = -1;
+    if (s_done)
+    {
+        vSemaphoreDelete(s_done);
+        s_done = NULL;
+    }
+    if (s_draw_lock)
+    {
+        vSemaphoreDelete(s_draw_lock);
+        s_draw_lock = NULL;
+    }
+}
+
+#else
+
+esp_err_t gpsp_p4_nano_lcd_init(void)
+{
+    return ESP_OK;
+}
+
+bool gpsp_p4_nano_lcd_present(const uint16_t *pixels, unsigned width,
+        unsigned height, size_t pitch)
+{
+    (void)pixels;
+    (void)width;
+    (void)height;
+    (void)pitch;
+    return false;
+}
+
+uint16_t *gpsp_p4_nano_lcd_next_buffer(void)
+{
+    return NULL;
+}
+
+void gpsp_p4_nano_lcd_frameskip(int frameskip)
+{
+    (void)frameskip;
+}
+
+void gpsp_p4_nano_lcd_status(unsigned cpu0, unsigned cpu1, int temp_tenths,
+        unsigned speed, unsigned ram_kib, unsigned min_kib,
+        unsigned psram_used_tenths, unsigned psram_mib)
+{
+    (void)cpu0;
+    (void)cpu1;
+    (void)temp_tenths;
+    (void)speed;
+    (void)ram_kib;
+    (void)min_kib;
+    (void)psram_used_tenths;
+    (void)psram_mib;
+}
+
+#if CONFIG_GPSP_MENU
+bool gpsp_p4_nano_lcd_ui_begin(uint16_t **pixels, const uint16_t **frame)
+{
+    *pixels = NULL;
+    *frame = NULL;
+    return false;
+}
+
+void gpsp_p4_nano_lcd_ui_draw(unsigned y0, unsigned y1)
+{
+    (void)y0;
+    (void)y1;
+}
+
+void gpsp_p4_nano_lcd_ui_end(void)
+{
+}
+#endif
+
+void gpsp_p4_nano_lcd_shutdown(void)
+{
+}
+
+#endif

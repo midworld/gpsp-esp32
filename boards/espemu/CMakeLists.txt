@@ -13,6 +13,8 @@ idf_component_register(
         "espemu_transport.c"
         "gpsp_profile.c"
         "gpsp_rv32_platform.c"
+        "gpsp_serial_input.c"
+        "gpsp_status.c"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS
