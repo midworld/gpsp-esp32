@@ -1,0 +1,5 @@
+# Fixed-frame benchmark. Use this file for every execution mode.
+CONFIG_GPSP_BENCHMARK=y
+CONFIG_GPSP_BENCHMARK_STOP_AFTER_REPORT=y
+# CONFIG_GPSP_ESPEMU_UNTHROTTLED is not set
+# CONFIG_ESP_SYSTEM_MEMPROT is not set

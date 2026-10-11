@@ -96,6 +96,15 @@ build/espemu-host/gpsp-espemu-host --serial /dev/cu.usbmodemXXXX \
 
 ## Profile
 
+- Build and merge an ESP-EMU image with a ROM, then run:
+
+```sh
+tools/profile-espemu.sh --build-dir build-espemu 30s
+```
+
+- Output goes under `profiles/`: `metrics.csv`, `trace.json`, logs, and
+  `metadata.txt`. Open the trace in [Perfetto](https://ui.perfetto.dev).
+- Pass an output directory after the duration if needed.
 - The viewer also accepts a CSV path:
 
 ```sh

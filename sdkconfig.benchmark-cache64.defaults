@@ -1,0 +1,4 @@
+# Add after benchmark and block defaults to stress cache reuse.
+CONFIG_GPSP_RV32_CODE_CHUNK_KIB=64
+CONFIG_GPSP_RV32_ROM_CACHE_KIB=512
+CONFIG_GPSP_RV32_RAM_CACHE_KIB=512

@@ -1,0 +1,2 @@
+# Add after sdkconfig.benchmark.defaults for a diagnostic RV32 JIT build.
+CONFIG_GPSP_BENCHMARK_JIT_DETAIL=y

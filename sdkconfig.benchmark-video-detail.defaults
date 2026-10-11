@@ -1,0 +1,2 @@
+# Add after sdkconfig.benchmark.defaults in SDKCONFIG_DEFAULTS.
+CONFIG_GPSP_BENCHMARK_VIDEO_DETAIL=y
