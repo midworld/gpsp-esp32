@@ -20,9 +20,53 @@
 
 extern "C" {
   #include "common.h"
+  #include "gpsp_frame_stats.h"
+  #include "gpsp_screen.h"
+#if defined(GPSP_BENCHMARK)
+  #include "gpsp_benchmark_timing.h"
+#endif
+}
+
+#if defined(__riscv) && !defined(GPSP_BENCHMARK)
+/* Always counted: the frontend logs render time in slow frames. */
+static u32 render_cycles;
+
+static inline u32 render_cycle_count(void)
+{
+  u32 cycles;
+  __asm__ volatile("rdcycle %0" : "=r"(cycles));
+  return cycles;
+}
+#define render_cycles_begin() u32 render_start = render_cycle_count()
+#define render_cycles_end() \
+  (render_cycles += render_cycle_count() - render_start)
+#else
+#define render_cycles_begin() ((void)0)
+#define render_cycles_end() ((void)0)
+#endif
+
+uint32_t gpsp_video_render_cycles(void)
+{
+#if defined(__riscv) && !defined(GPSP_BENCHMARK)
+  return render_cycles;
+#else
+  return 0;
+#endif
 }
 
 u16* gba_screen_pixels = NULL;
+
+static_assert(GPSP_SCREEN_BUFFER_BYTES == GBA_SCREEN_BUFFER_SIZE,
+    "frontend screen buffers must match the core's");
+
+uint16_t *gpsp_screen_set_buffer(uint16_t *pixels)
+{
+  uint16_t *previous = gba_screen_pixels;
+
+  if (pixels)
+    gba_screen_pixels = pixels;
+  return previous;
+}
 
 #define get_screen_pixels()   gba_screen_pixels
 #define get_screen_pitch()    GBA_SCREEN_PITCH
@@ -134,11 +178,27 @@ static inline s32 signext28(u32 value)
 
 void video_reload_counters()
 {
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_enter(GPSP_BENCHMARK_VIDEO_SETUP);
+#endif
   /* This happens every Vblank */
   affine_reference_x[0] = signext28(read_ioreg32(REG_BG2X_L));
   affine_reference_y[0] = signext28(read_ioreg32(REG_BG2Y_L));
   affine_reference_x[1] = signext28(read_ioreg32(REG_BG3X_L));
   affine_reference_y[1] = signext28(read_ioreg32(REG_BG3Y_L));
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_leave();
+#endif
+}
+
+// A zero nibble (4bpp) or byte (8bpp) marks a transparent pixel. These test
+// a whole tile row (or half row for 8bpp) at once.
+static inline bool tile_row_opaque_4bpp(u32 row) {
+  return ((row - 0x11111111u) & ~row & 0x88888888u) == 0;
+}
+
+static inline bool tile_row_opaque_8bpp(u32 half) {
+  return ((half - 0x01010101u) & ~half & 0x80808080u) == 0;
 }
 
 // Renders non-affine tiled background layer.
@@ -235,7 +295,21 @@ static inline void render_tile_Nbpp(
   if (is8bpp) {
     for (u32 j = 0; j < 2; j++) {
       u32 tilepix = eswap32(((u32*)tile_ptr)[hflip ? 1-j : j]);
-      if (tilepix) {
+      if (!tilepix) {   // Transparent half row: only the base layer draws
+        for (u32 i = 0; i < 4; i++, dest_ptr++)
+          if (isbase)
+            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+      } else if (tile_row_opaque_8bpp(tilepix)) {
+        for (u32 i = 0; i < 4; i++, dest_ptr++) {
+          u8 pval = hflip ? (tilepix >> (24 - i*8)) : (tilepix >> (i*8));
+          if (rdtype == FULLCOLOR)
+            *dest_ptr = paltbl[pval];
+          else if (rdtype == INDXCOLOR)
+            *dest_ptr = pval | px_comb;
+          else if (rdtype == STCKCOLOR)
+            *dest_ptr = pval | px_comb | ((isbase ? bg_comb : *dest_ptr) << 16);
+        }
+      } else {
         for (u32 i = 0; i < 4; i++, dest_ptr++) {
           u8 pval = hflip ? (tilepix >> (24 - i*8)) : (tilepix >> (i*8));
           if (pval) {
@@ -250,10 +324,6 @@ static inline void render_tile_Nbpp(
             *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
           }
         }
-      } else {
-        for (u32 i = 0; i < 4; i++, dest_ptr++)
-          if (isbase)
-            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
       }
     }
   } else {
@@ -262,18 +332,32 @@ static inline void render_tile_Nbpp(
       u16 tilepal = (tile >> 12) << 4;
       u16 pxflg = px_comb | tilepal;
       const u16 *subpal = &paltbl[tilepal];
-      for (u32 i = 0; i < 8; i++, dest_ptr++) {
-        u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
-        if (pval) {
+      if (tile_row_opaque_4bpp(tilepix)) {
+        for (u32 i = 0; i < 8; i++, dest_ptr++) {
+          u8 pval = hflip ? tilepix >> 28 : tilepix & 0xF;
           if (rdtype == FULLCOLOR)
             *dest_ptr = subpal[pval];
           else if (rdtype == INDXCOLOR)
             *dest_ptr = pxflg | pval;
           else if (rdtype == STCKCOLOR)
             *dest_ptr = pxflg | pval | ((isbase ? bg_comb : *dest_ptr) << 16);
+          if (hflip) tilepix <<= 4;
+          else       tilepix >>= 4;
         }
-        else if (isbase) {
-          *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+      } else {
+        for (u32 i = 0; i < 8; i++, dest_ptr++) {
+          u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
+          if (pval) {
+            if (rdtype == FULLCOLOR)
+              *dest_ptr = subpal[pval];
+            else if (rdtype == INDXCOLOR)
+              *dest_ptr = pxflg | pval;
+            else if (rdtype == STCKCOLOR)
+              *dest_ptr = pxflg | pval | ((isbase ? bg_comb : *dest_ptr) << 16);
+          }
+          else if (isbase) {
+            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+          }
         }
       }
     } else if (isbase) {
@@ -628,6 +712,89 @@ static inline void render_bdrop_pixel_8bpp(
     *dest_ptr = 0 | bg_comb;
 }
 
+#if defined(GPSP_AFFINE_PIE)
+// Vector address generation for rotated affine walks (see
+// riscv/rv32_affine_pie.S). Field order matches the assembly reads.
+typedef struct {
+  s32 x[4];
+  s32 y[4];
+  u32 mask, seven, tile_base, map_base;
+  s32 dx4, dy4;
+} __attribute__((aligned(16))) affine_pie_params;
+
+extern "C" void gpsp_affine_pie_addr(const affine_pie_params *params,
+  u32 count, u32 map_pitch, u32 *out);
+
+// Map byte addresses, then tile base plus in-tile offsets, per pixel.
+static u32 affine_pie_addr[2][256] __attribute__((aligned(16)));
+
+// The assembly uses these offsets and the 1024-byte output gap directly.
+static_assert(offsetof(affine_pie_params, y) == 16, "PIE params layout");
+static_assert(offsetof(affine_pie_params, mask) == 32, "PIE params layout");
+static_assert(offsetof(affine_pie_params, seven) == 36, "PIE params layout");
+static_assert(offsetof(affine_pie_params, tile_base) == 40, "PIE params layout");
+static_assert(offsetof(affine_pie_params, map_base) == 44, "PIE params layout");
+static_assert(offsetof(affine_pie_params, dx4) == 48, "PIE params layout");
+static_assert(offsetof(affine_pie_params, dy4) == 52, "PIE params layout");
+static_assert(alignof(affine_pie_params) == 16, "PIE loads need 16 bytes");
+static_assert(sizeof(affine_pie_addr[0]) == 1024, "PIE tile output offset");
+static_assert(sizeof(affine_pie_addr[0]) / 4 >= ((GBA_SCREEN_WIDTH + 3) & ~3),
+  "PIE output holds a padded scanline");
+
+// Draws cnt rotated pixels from (source_x, source_y). Each coordinate is
+// wrapped with the map mask, which also suits walks that stay inside it.
+template<typename dtype, rendtype rdtype, bool isbase>
+static inline void render_affine_pie(
+  s32 source_x, s32 source_y, s32 dx, s32 dy, u32 cnt, u32 map_size,
+  const u8 *map_base, const u8 *tile_base, dtype *dst_ptr,
+  u32 bg_comb, u32 px_comb, const u16 *pal
+) {
+  affine_pie_params params;
+  for (u32 k = 0; k < 4; k++) {
+    params.x[k] = source_x + (s32)k * dx;
+    params.y[k] = source_y + (s32)k * dy;
+  }
+  params.mask = (128 << map_size) - 1;
+  params.seven = 7;
+  params.tile_base = (u32)(uintptr_t)tile_base;
+  params.map_base = (u32)(uintptr_t)map_base;
+  params.dx4 = dx * 4;
+  params.dy4 = dy * 4;
+  gpsp_affine_pie_addr(&params, (cnt + 3) & ~3U, map_size + 4,
+    &affine_pie_addr[0][0]);
+
+  // Two pixels per step: their independent read chains interleave, which
+  // hides most load latency on this in-order core.
+  const u32 *map_addr = affine_pie_addr[0];
+  const u32 *tile_addr = affine_pie_addr[1];
+  u32 i = 0;
+  for (; i + 2 <= cnt; i += 2) {
+    u8 tile0 = *(const u8 *)(uintptr_t)map_addr[i];
+    u8 tile1 = *(const u8 *)(uintptr_t)map_addr[i + 1];
+    u8 pval0 = ((const u8 *)(uintptr_t)tile_addr[i])[tile0 * tile_size_8bpp];
+    u8 pval1 = ((const u8 *)(uintptr_t)tile_addr[i + 1])
+      [tile1 * tile_size_8bpp];
+    rend_pix_8bpp<dtype, rdtype, isbase>(dst_ptr++, pval0, bg_comb, px_comb, pal);
+    rend_pix_8bpp<dtype, rdtype, isbase>(dst_ptr++, pval1, bg_comb, px_comb, pal);
+  }
+  if (i < cnt) {
+    u8 tile = *(const u8 *)(uintptr_t)map_addr[i];
+    u8 pval = ((const u8 *)(uintptr_t)tile_addr[i])[tile * tile_size_8bpp];
+    rend_pix_8bpp<dtype, rdtype, isbase>(dst_ptr, pval, bg_comb, px_comb, pal);
+  }
+}
+
+// Steps from an inside coordinate before it leaves [0, size) (8.8 fixed).
+static inline u32 affine_steps_inside(s32 pos, s32 step, s32 size, u32 cnt)
+{
+  if (step > 0)
+    return MIN(cnt, (u32)((size - 1 - pos) / step) + 1);
+  if (step < 0)
+    return MIN(cnt, (u32)(pos / -step) + 1);
+  return cnt;
+}
+#endif
+
 typedef void (*affine_render_function) (
   u32 layer, u32 start, u32 cnt, const u8 *map_base,
   u32 map_size, const u8 *tile_base, void *dst_ptr,
@@ -662,6 +829,14 @@ static inline void render_affine_background(
   const u32 mosh = (mosaic ? (read_ioreg(REG_MOSAIC)) & 0xF : 0) + 1;
 
   if (wrap) {
+#if defined(GPSP_AFFINE_PIE)
+    // Vector code computes the addresses; the reads stay scalar.
+    if (rotate && !mosaic) {
+      render_affine_pie<dtype, rdtype, isbase>(source_x, source_y, dx, dy,
+        cnt, map_size, map_base, tile_base, dst_ptr, bg_comb, px_comb, pal);
+      return;
+    }
+#endif
     // In wrap mode the entire space is covered, since it "wraps" at the edges
     u8 pval = 0;
     u32 mctr = 0;
@@ -718,6 +893,21 @@ static inline void render_affine_background(
         source_x += dx; source_y += dy;
         cnt--;
       }
+
+#if defined(GPSP_AFFINE_PIE)
+      // A line crosses the square map once, so the inside pixels form one
+      // run. The loop below then stops at the first pixel past it.
+      if (!mosaic && cnt) {
+        s32 size = (s32)(width_height << 8);
+        u32 run = affine_steps_inside(source_x, dx, size, cnt);
+        run = affine_steps_inside(source_y, dy, size, run);
+        render_affine_pie<dtype, rdtype, isbase>(source_x, source_y, dx, dy,
+          run, map_size, map_base, tile_base, dst_ptr, bg_comb, px_comb, pal);
+        dst_ptr += run;
+        source_x += (s32)run * dx; source_y += (s32)run * dy;
+        cnt -= run;
+      }
+#endif
 
       // Draw background pixels by looking them up in the map
       u8 pval = 0;
@@ -893,12 +1083,17 @@ static inline void render_scanline_bitmap(
     if (source_x < 0) {
       // The bitmap starts somewhere after "start", skip those pixels.
       u32 delta = (-source_x + 255) >> 8;
+      if (delta >= end - start)
+        return;
       dst_ptr += delta;
       start += delta;
       source_x = 0;
     }
 
     u32 pixel_x = (u32)(source_x >> 8);
+    // The line starts right of the bitmap: nothing to draw.
+    if (pixel_x >= width)
+      return;
     u32 pixcnt = MIN(end - start, width - pixel_x);
     pixfmt *valptr = &src_ptr[pixel_x + (pixel_y * width)];
     pixfmt val = 0;
@@ -1732,6 +1927,26 @@ static void order_layers(u32 layer_flags, u32 vcnt)
   #define SATB_MSK 0x0000001F
 #endif
 
+// Encourages the compiler to load a value before a branch instead of next
+// to its use, where an in-order core stalls. Not guaranteed; checked in the
+// generated code with GCC 15.
+#if defined(__GNUC__)
+#define load_early(value) __asm__("" : "+r"(value))
+#else
+#define load_early(value) ((void)0)
+#endif
+
+// Palette color spread to 0G0R0B for the blend math.
+#ifdef PALETTE_EXPANDED
+static_assert(PALETTE_EXPAND_MASK == BLND_MSK, "Blend layouts differ");
+#define blend_color(index) palette_ram_expanded[index]
+#else
+static inline u32 blend_color(u32 index) {
+  u16 color = palette_ram_converted[index];
+  return (color | (color << 16)) & BLND_MSK;
+}
+#endif
+
 typedef enum
 {
   OBJ_BLEND,    // No effects, just blend forced-blend pixels (ie. ST objects)
@@ -1749,6 +1964,9 @@ typedef enum
 // Bit 11 is set if the pixel belongs to a ST-object
 template <blendtype bldtype, bool st_objs>
 static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
   u32 bldalpha = read_ioreg(REG_BLDALPHA);
   u32 brightf = MIN(16, read_ioreg(REG_BLDY) & 0x1F);
   u32 blend_a = MIN(16, (bldalpha >> 0) & 0x1F);
@@ -1760,6 +1978,10 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
     // If blending can result in saturation, we need to clamp output values.
     while (start < end) {
       u32 pixpair = src[start];
+      // Load the plain color before branching: it hides the load latency
+      // on the common no-effect path.
+      u32 pixcol = palette_ram_converted[pixpair & 0x1FF];
+      load_early(pixcol);
       // If ST-OBJ, force blending mode (has priority over other effects).
       // If regular blending mode, blend if 1st/2nd bits are set respectively.
       // Otherwise, apply other color effects if 1st bit is set.
@@ -1767,10 +1989,8 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
       bool do_blend    = (pixpair & 0x04000200) == 0x04000200;
       if ((st_objs && force_blend) || (do_blend && bldtype == BLEND_ONLY)) {
         // Top pixel is 1st target, pixel below is 2nd target. Blend!
-        u16 p1 = palette_ram_converted[(pixpair >>  0) & 0x1FF];
-        u16 p2 = palette_ram_converted[(pixpair >> 16) & 0x1FF];
-        u32 p1e = (p1 | (p1 << 16)) & BLND_MSK;
-        u32 p2e = (p2 | (p2 << 16)) & BLND_MSK;
+        u32 p1e = blend_color((pixpair >>  0) & 0x1FF);
+        u32 p2e = blend_color((pixpair >> 16) & 0x1FF);
         u32 pfe = (((p1e * blend_a) + (p2e * blend_b)) >> 4);
 
         // If the overflow bit is set, saturate (set) all bits to one.
@@ -1788,51 +2008,56 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
       else if ((bldtype == BLEND_DARK || bldtype == BLEND_BRIGHT) &&
                (pixpair & 0x200) == 0x200) {
         // Top pixel is 1st-target, can still apply bright/dark effect.
-        u16 pidx = palette_ram_converted[pixpair & 0x1FF];
-        u32 epixel = (pidx | (pidx << 16)) & BLND_MSK;
+        u32 epixel = blend_color(pixpair & 0x1FF);
         u32 pa = bldtype == BLEND_DARK ? 0 : ((BLND_MSK * brightf) >> 4) & BLND_MSK;
         u32 pb = ((epixel * (16 - brightf)) >> 4) & BLND_MSK;
         epixel = (pa + pb) & BLND_MSK;
         dst[start++] = (epixel >> 16) | epixel;
       }
       else {
-        dst[start++] = palette_ram_converted[pixpair & 0x1FF];   // No effects
+        dst[start++] = pixcol;   // No effects
       }
     }
   } else {
     while (start < end) {
       u32 pixpair = src[start];
+      u32 pixcol = palette_ram_converted[pixpair & 0x1FF];
+      load_early(pixcol);
       bool do_blend    = (pixpair & 0x04000200) == 0x04000200;
       bool force_blend = (pixpair & 0x04000800) == 0x04000800;
       if ((st_objs && force_blend) || (do_blend && bldtype == BLEND_ONLY)) {
         // Top pixel is 1st target, pixel below is 2nd target. Blend!
-        u16 p1 = palette_ram_converted[(pixpair >>  0) & 0x1FF];
-        u16 p2 = palette_ram_converted[(pixpair >> 16) & 0x1FF];
-        u32 p1e = (p1 | (p1 << 16)) & BLND_MSK;
-        u32 p2e = (p2 | (p2 << 16)) & BLND_MSK;
+        u32 p1e = blend_color((pixpair >>  0) & 0x1FF);
+        u32 p2e = blend_color((pixpair >> 16) & 0x1FF);
         u32 pfe = (((p1e * blend_a) + (p2e * blend_b)) >> 4) & BLND_MSK;
         dst[start++] = (pfe >> 16) | pfe;
       }
       else if ((bldtype == BLEND_DARK || bldtype == BLEND_BRIGHT) &&
                (pixpair & 0x200) == 0x200) {
         // Top pixel is 1st-target, can still apply bright/dark effect.
-        u16 pidx = palette_ram_converted[pixpair & 0x1FF];
-        u32 epixel = (pidx | (pidx << 16)) & BLND_MSK;
+        u32 epixel = blend_color(pixpair & 0x1FF);
         u32 pa = bldtype == BLEND_DARK ? 0 : ((BLND_MSK * brightf) >> 4) & BLND_MSK;
         u32 pb = ((epixel * (16 - brightf)) >> 4) & BLND_MSK;
         epixel = (pa + pb) & BLND_MSK;
         dst[start++] = (epixel >> 16) | epixel;
       }
       else {
-        dst[start++] = palette_ram_converted[pixpair & 0x1FF];   // No effects
+        dst[start++] = pixcol;   // No effects
       }
     }
   }
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_EFFECTS,
+    gpsp_benchmark_video_detail_now() - detail_start);
+#endif
 }
 
 // Applies brighten/darken effect to a bunch of color-indexed pixels.
 template <blendtype bldtype>
 static void merge_brightness(u32 start, u32 end, u16 *srcdst) {
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
   u32 brightness = MIN(16, read_ioreg(REG_BLDY) & 0x1F);
 
   while (start < end) {
@@ -1841,7 +2066,7 @@ static void merge_brightness(u32 start, u32 end, u16 *srcdst) {
 
     if ((spix & 0x200) == 0x200) {
       // Pixel is 1st target, can apply color effect.
-      u32 epixel = (pixcol | (pixcol << 16)) & BLND_MSK;
+      u32 epixel = blend_color(spix & 0x1FF);
       u32 pa = bldtype == BLEND_DARK ? 0 : ((BLND_MSK * brightness) >> 4) & BLND_MSK; // B/W
       u32 pb = ((epixel * (16 - brightness)) >> 4) & BLND_MSK;  // Pixel color
       epixel = (pa + pb) & BLND_MSK;
@@ -1850,6 +2075,10 @@ static void merge_brightness(u32 start, u32 end, u16 *srcdst) {
 
     srcdst[start++] = pixcol;
   }
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_EFFECTS,
+    gpsp_benchmark_video_detail_now() - detail_start);
+#endif
 }
 
 // Fills a segment using the backdrop color (in the right mode).
@@ -1918,6 +2147,9 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
       if (!base_done)
         fill_line_background<bgmode, dsttype>(start, end, dst_ptr);
 
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+      uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
       // Optimization: skip blending mode if no blending can happen to this layer
       if (objmode == STCKCOLOR && can_skip_blend)
         render_scanline_objs<dsttype, INDXCOLOR>(
@@ -1925,6 +2157,10 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
       else
         render_scanline_objs<dsttype, objmode>(
           layer & 0x3, start, end, dst_ptr, &palette_ram_converted[0x100]);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+      gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_OBJ_LAYER,
+        gpsp_benchmark_video_detail_now() - detail_start);
+#endif
 
       base_done = 1;
     }
@@ -1935,6 +2171,9 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
       bool is_affine = (video_mode >= 1) && (layer >= 2);
       u32 fnidx = (base_done) | (is_affine ? 2 : 0);
 
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+      uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
       // Can optimize rendering if no blending can really happen.
       // If stack mode, no blending and not base layer, we might speed up a bit
       if (bgmode == STCKCOLOR && can_skip_blend) {
@@ -1954,6 +2193,11 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
         };
         rdfns[fnidx](layer, start, end, dst_ptr, palette_ram_converted);
       }
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+      gpsp_benchmark_video_detail_add(
+        is_affine ? GPSP_BENCHMARK_VIDEO_AFFINE_BG : GPSP_BENCHMARK_VIDEO_TEXT_BG,
+        gpsp_benchmark_video_detail_now() - detail_start);
+#endif
 
       base_done = 1;
     }
@@ -2083,6 +2327,62 @@ static const bitmap_layer_render_struct idx32_bmrend[3][2] =
   bitmap_layer_render_functions(INDXCOLOR, u32, 5, u16, 160, 128)
 };
 
+// Mode 4 BG2 without scaling, rotation or mosaic, drawn over the backdrop
+// in one pass. Index 0 shows the backdrop, which is BG palette entry 0, so
+// every pixel is a palette lookup. BG2 must be the bottom layer.
+static void render_mode4_blit_backdrop(u32 start, u32 end, u16 *scanline)
+{
+  const u16 bgcol = palette_ram_converted[0];
+  s32 source_x = affine_reference_x[0] + start * 256;
+  u32 pixel_y = (u32)(affine_reference_y[0] >> 8);
+  u16 *dst_ptr = scanline + start;
+  u32 count = end - start;
+  u32 skip = 0, pixcnt = 0;
+
+  if (pixel_y < 160)
+  {
+    if (source_x < 0)
+    {
+      skip = MIN(count, (u32)(-source_x + 255) >> 8);
+      source_x = 0;
+    }
+    u32 pixel_x = (u32)(source_x >> 8);
+    if (pixel_x < 240)
+      pixcnt = MIN(count - skip, 240 - pixel_x);
+    for (u32 i = 0; i < skip; i++)
+      *dst_ptr++ = bgcol;
+  }
+  if (pixcnt)
+  {
+    bool second_frame = (read_ioreg(REG_DISPCNT) & 0x10) != 0;
+    const u8 *src_ptr = &vram[second_frame ? 0xA000 : 0x0000] +
+        (u32)(source_x >> 8) + pixel_y * 240;
+    u32 i = 0;
+    // Aligned runs read four indices and write two pixel pairs. memcpy
+    // keeps the accesses well typed; the alignment hints make them lw/sw.
+    if (!(((uintptr_t)src_ptr | (uintptr_t)dst_ptr) & 3))
+    {
+      const u8 *src4 = (const u8 *)__builtin_assume_aligned(src_ptr, 4);
+      u16 *dst4 = (u16 *)__builtin_assume_aligned(dst_ptr, 4);
+      for (; i + 4 <= pixcnt; i += 4)
+      {
+        u32 idx, pair[2];
+        memcpy(&idx, src4 + i, sizeof(idx));
+        pair[0] = palette_ram_converted[idx & 0xff] |
+            ((u32)palette_ram_converted[(idx >> 8) & 0xff] << 16);
+        pair[1] = palette_ram_converted[(idx >> 16) & 0xff] |
+            ((u32)palette_ram_converted[idx >> 24] << 16);
+        memcpy(dst4 + i, pair, sizeof(pair));
+      }
+    }
+    for (; i < pixcnt; i++)
+      dst_ptr[i] = palette_ram_converted[src_ptr[i]];
+    dst_ptr += pixcnt;
+  }
+  for (u32 i = skip + pixcnt; i < count; i++)
+    *dst_ptr++ = bgcol;
+}
+
 // Render the BG and OBJ in a bitmap scanline from start to end ONLY if
 // enable_flag allows that layer/OBJ.
 
@@ -2113,10 +2413,28 @@ static void bitmap_render_layers(
 
   u32 current_layer;
   u32 layer_order_pos;
+  u32 first_layer = 0;
 
-  fill_line_background<bgmode, dsttype>(start, end, scanline);
+  // A bottom BG2 layer that covers the line replaces the backdrop fill.
+  if (bgmode == FULLCOLOR && modeidx == 1 && !mmode && layer_count &&
+      !(layer_order[0] & 0x04) && (enable_flags & 0x04) &&
+      !(s16)read_ioreg(REG_BG2PC) && (s16)read_ioreg(REG_BG2PA) == 256)
+  {
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
+    render_mode4_blit_backdrop(start, end, (u16 *)scanline);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_BITMAP_BG,
+      gpsp_benchmark_video_detail_now() - detail_start);
+#endif
+    first_layer = 1;
+  }
+  else
+    fill_line_background<bgmode, dsttype>(start, end, scanline);
 
-  for(layer_order_pos = 0; layer_order_pos < layer_count; layer_order_pos++)
+  for(layer_order_pos = first_layer; layer_order_pos < layer_count;
+      layer_order_pos++)
   {
     current_layer = layer_order[layer_order_pos];
     if(current_layer & 0x04)
@@ -2124,6 +2442,9 @@ static void bitmap_render_layers(
       if (enable_flags & 0x10) {
         bool can_skip_blend = !has_trans_obj && !objlayer_is_1st_tgt;
 
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+        uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
         // Optimization: skip blending mode if no blending can happen to this layer
         if (objmode == STCKCOLOR && can_skip_blend)
           render_scanline_objs<dsttype, INDXCOLOR>(
@@ -2131,6 +2452,10 @@ static void bitmap_render_layers(
         else
           render_scanline_objs<dsttype, objmode>(
             current_layer & 3, start, end, scanline, &palette_ram_converted[0x100]);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+        gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_OBJ_LAYER,
+          gpsp_benchmark_video_detail_now() - detail_start);
+#endif
       }
     }
     else
@@ -2144,12 +2469,19 @@ static void bitmap_render_layers(
         const bitmap_layer_render_struct *rd =
           (bgmode == STCKCOLOR && can_skip_blend) ? idxm_rend : mode_rend;
 
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+        uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
         if (dy)
           rd->affine_render(start, end, scanline, palette_ram_converted);
         else if (dx == 256)
           rd->blit_render(start, end, scanline, palette_ram_converted);
         else
           rd->scale_render(start, end, scanline, palette_ram_converted);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+        gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_BITMAP_BG,
+          gpsp_benchmark_video_detail_now() - detail_start);
+#endif
       }
     }
   }
@@ -2345,6 +2677,10 @@ static const u8 active_layers[] = {
 
 void update_scanline(void)
 {
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_enter(GPSP_BENCHMARK_SCANLINE);
+#endif
+  render_cycles_begin();
   u32 pitch = get_screen_pitch();
   u16 dispcnt = read_ioreg(REG_DISPCNT);
   u32 vcount = read_ioreg(REG_VCOUNT);
@@ -2352,26 +2688,60 @@ void update_scanline(void)
   u32 video_mode = dispcnt & 0x07;
 
   if(skip_next_frame)
+  {
+    render_cycles_end();
+#if defined(GPSP_BENCHMARK)
+    gpsp_benchmark_timing_leave();
+#endif
     return;
+  }
+
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  uint32_t phase_start;
+  gpsp_benchmark_video_detail_line(video_mode, dispcnt & 0x80,
+                                   dispcnt & 0xE000);
+#endif
 
   // If OAM has been modified since the last scanline has been updated then
   // reorder and reprofile the OBJ lists.
   if(reg[OAM_UPDATED])
   {
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    phase_start = gpsp_benchmark_video_detail_now();
+#endif
     order_obj(video_mode);
     reg[OAM_UPDATED] = 0;
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_OAM,
+      gpsp_benchmark_video_detail_now() - phase_start);
+#endif
   }
 
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  phase_start = gpsp_benchmark_video_detail_now();
+#endif
   order_layers((dispcnt >> 8) & active_layers[video_mode], vcount);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_LAYERS,
+    gpsp_benchmark_video_detail_now() - phase_start);
+  phase_start = gpsp_benchmark_video_detail_now();
+#endif
 
   // If the screen is in in forced blank draw pure white.
   if(dispcnt & 0x80)
     memset(screen_offset, 0xff, 240*sizeof(u16));
   else
     render_scanline_window(screen_offset);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_DRAW,
+    gpsp_benchmark_video_detail_now() - phase_start);
+#endif
 
   // Mode 0 does not use any affine params at all.
   if (video_mode) {
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    phase_start = gpsp_benchmark_video_detail_now();
+#endif
     // Account for vertical mosaic effect, by correcting affine references.
     const u32 bgmosv = ((read_ioreg(REG_MOSAIC) >> 4) & 0xF) + 1;
 
@@ -2394,7 +2764,13 @@ void update_scanline(void)
       affine_reference_x[1] += (s16)read_ioreg(REG_BG3PB);
       affine_reference_y[1] += (s16)read_ioreg(REG_BG3PD);
     }
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_AFFINE,
+      gpsp_benchmark_video_detail_now() - phase_start);
+#endif
   }
+  render_cycles_end();
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_leave();
+#endif
 }
-
-

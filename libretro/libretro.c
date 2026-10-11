@@ -15,6 +15,253 @@
 #include "../gba_memory.h"
 #include "../gba_cc_lut.h"
 
+#if defined(GPSP_BENCHMARK)
+#include "gpsp_benchmark.h"
+#include "../gpsp_benchmark_timing.h"
+
+static struct gpsp_benchmark_frame s_benchmark_frame;
+
+void gpsp_benchmark_get_last_frame(struct gpsp_benchmark_frame *frame)
+{
+   *frame = s_benchmark_frame;
+}
+#endif
+
+#if defined(GPSP_RV32_JIT)
+#include "../riscv/rv32_block_runtime.h"
+#if defined(GPSP_BENCHMARK_JIT_DETAIL)
+#include "../riscv/rv32_arm_memory.h"
+#include "../riscv/rv32_bios_probe.h"
+#endif
+#endif
+
+#if defined(GPSP_BENCHMARK)
+void gpsp_benchmark_get_engine(struct gpsp_benchmark_engine *engine)
+{
+   memset(engine, 0, sizeof(*engine));
+#if defined(GPSP_RV32_JIT)
+   gpsp_rv32_block_get_stats(
+         &engine->blocks, &engine->scalar_steps, &engine->cache_flushes,
+         &engine->code_bytes, &engine->ready);
+   engine->scalar_runs = gpsp_rv32_block_get_interpreter_runs();
+   engine->ram_flushes = gpsp_rv32_block_get_ram_flushes();
+   engine->ram_code_bytes = gpsp_rv32_block_get_ram_code_bytes();
+   struct gpsp_rv32_cache_stats cache;
+   gpsp_rv32_block_get_cache_stats(&cache);
+   engine->rom_code_capacity_bytes = cache.rom_capacity_bytes;
+   engine->ram_code_capacity_bytes = cache.ram_capacity_bytes;
+   engine->rom_discarded_bytes = cache.rom_discarded_bytes;
+   engine->ram_discarded_bytes = cache.ram_discarded_bytes;
+   engine->chunk_retries = cache.chunk_retries;
+   engine->chunk_tail_bytes = cache.chunk_tail_bytes;
+   struct gpsp_rv32_phase_cycles phases;
+   gpsp_rv32_block_get_phase_cycles(&phases);
+   engine->total_cycles = phases.total;
+   engine->lookup_cycles = phases.lookup;
+   engine->block_cycles = phases.block;
+   engine->scalar_cycles = phases.scalar;
+   struct gpsp_rv32_compile_stats compile;
+   gpsp_rv32_block_get_compile_stats(&compile);
+   engine->translated_blocks = compile.blocks;
+   engine->translated_guest_ops = compile.guest_ops;
+   engine->translated_code_bytes = compile.code_bytes;
+   engine->flow_blocks = compile.flow_blocks;
+   engine->flow_arm_blocks = compile.flow_arm_blocks;
+   engine->flow_thumb_blocks = compile.flow_thumb_blocks;
+   engine->flow_ram_blocks = compile.flow_ram_blocks;
+   engine->flow_legacy_blocks = compile.flow_legacy_blocks;
+   engine->flow_guest_ops = compile.flow_guest_ops;
+   engine->flow_helper_ops = compile.flow_helper_ops;
+   engine->flow_regions = compile.flow_regions;
+   engine->flow_entries = compile.flow_entries;
+   engine->flow_code_bytes = compile.flow_code_bytes;
+   engine->bundled_guest_ops = compile.bundled_guest_ops;
+   engine->flushed_code_bytes = compile.flushed_bytes;
+   engine->max_guest_ops = compile.max_guest_ops;
+   engine->max_thumb_guest_ops = compile.max_thumb_guest_ops;
+   engine->max_block_bytes = compile.max_block_bytes;
+   engine->max_flush_bytes = compile.max_flush_bytes;
+   memcpy(engine->thumb_span_count, compile.span_count,
+         sizeof(engine->thumb_span_count));
+   struct gpsp_rv32_site_stats sites;
+   gpsp_rv32_block_get_site_stats(&sites);
+   engine->jit_sites.arm_ops = sites.arm_ops;
+   engine->jit_sites.thumb_ops = sites.thumb_ops;
+   engine->jit_sites.thumb_loads = sites.thumb_loads;
+   engine->jit_sites.thumb_stores = sites.thumb_stores;
+   engine->jit_sites.thumb_literals = sites.thumb_literals;
+   engine->jit_sites.thumb_nonmem_fallbacks = sites.thumb_nonmem_fallbacks;
+   engine->jit_sites.thumb_push = sites.thumb_push;
+   engine->jit_sites.thumb_pop = sites.thumb_pop;
+   engine->jit_sites.thumb_stmia = sites.thumb_stmia;
+   engine->jit_sites.thumb_ldmia = sites.thumb_ldmia;
+#if defined(GPSP_BENCHMARK_JIT_CODE_BYTES)
+   struct gpsp_rv32_rom_byte_stats code_bytes;
+   gpsp_rv32_block_get_rom_byte_stats(&code_bytes);
+   struct gpsp_rv32_overlap_byte_stats overlap;
+   gpsp_rv32_block_get_overlap_byte_stats(&overlap);
+   _Static_assert(sizeof(engine->jit_code_bytes) == sizeof(code_bytes),
+         "code-byte benchmark layout differs");
+   _Static_assert(sizeof(engine->jit_overlap_bytes) == sizeof(overlap),
+         "overlap benchmark layout differs");
+   memcpy(&engine->jit_code_bytes, &code_bytes, sizeof(code_bytes));
+   memcpy(&engine->jit_overlap_bytes, &overlap, sizeof(overlap));
+#endif
+   struct gpsp_rv32_interpreter_stats interpreter;
+   gpsp_rv32_block_get_interpreter_stats(&interpreter);
+   engine->generated_steps = interpreter.generated_steps;
+   engine->generated_arm = interpreter.generated_arm;
+   engine->generated_thumb = interpreter.generated_thumb;
+   engine->direct_steps = interpreter.direct_steps;
+   engine->bulk_runs = interpreter.bulk_runs;
+   engine->bulk_steps = interpreter.bulk_steps;
+   engine->generated_region.bios = interpreter.generated_bios;
+   engine->generated_region.ewram = interpreter.generated_ewram;
+   engine->generated_region.iwram = interpreter.generated_iwram;
+   engine->generated_region.rom = interpreter.generated_rom;
+   engine->generated_region.other = interpreter.generated_other;
+   engine->bulk_region.bios = interpreter.bulk_bios;
+   engine->bulk_region.ewram = interpreter.bulk_ewram;
+   engine->bulk_region.iwram = interpreter.bulk_iwram;
+   engine->bulk_region.rom = interpreter.bulk_rom;
+   engine->bulk_region.other = interpreter.bulk_other;
+   struct gpsp_rv32_block_region_stats blocks;
+   gpsp_rv32_block_get_region_stats(&blocks);
+   engine->block_region.bios = blocks.bios;
+   engine->block_region.ewram = blocks.ewram;
+   engine->block_region.iwram = blocks.iwram;
+   engine->block_region.rom = blocks.rom;
+   engine->block_region.other = blocks.other;
+#if defined(GPSP_BENCHMARK_JIT_LOOKUP)
+   struct gpsp_rv32_lookup_stats lookup;
+   gpsp_rv32_block_get_lookup_stats(&lookup);
+   _Static_assert(sizeof(engine->jit_lookup) == sizeof(lookup),
+         "lookup benchmark layout differs");
+   memcpy(&engine->jit_lookup, &lookup, sizeof(lookup));
+#endif
+#if defined(GPSP_BENCHMARK_JIT_DETAIL)
+   struct gpsp_rv32_jit_detail_stats detail;
+   gpsp_rv32_block_get_jit_detail(&detail);
+   engine->jit_detail.code_cycles = detail.code_cycles;
+   engine->jit_detail.helper_cycles = detail.helper_cycles;
+   engine->jit_detail.helper_calls = detail.helper_calls;
+   engine->jit_detail.ram_load_fast = detail.ram_load_fast;
+   engine->jit_detail.ram_load_slow = detail.ram_load_slow;
+   engine->jit_detail.ram_store_fast = detail.ram_store_fast;
+   engine->jit_detail.ram_store_slow = detail.ram_store_slow;
+   engine->jit_detail.multi_fast = detail.multi_fast;
+   engine->jit_detail.multi_slow = detail.multi_slow;
+   engine->jit_detail.memory_cycles = detail.memory_cycles;
+   engine->jit_detail.memory_calls = detail.memory_calls;
+   engine->jit_detail.memory_rom_loads = detail.memory_rom_loads;
+   engine->jit_detail.memory_ram_loads = detail.memory_ram_loads;
+   engine->jit_detail.memory_io_loads = detail.memory_io_loads;
+   engine->jit_detail.memory_other_loads = detail.memory_other_loads;
+   engine->jit_detail.memory_stores = detail.memory_stores;
+   engine->jit_detail.arm_memory_calls = detail.arm_memory_calls;
+   engine->jit_detail.arm_block_calls = detail.arm_block_calls;
+   engine->jit_detail.arm_memory_cycles = detail.arm_memory_cycles;
+   engine->jit_detail.arm_block_cycles = detail.arm_block_cycles;
+   engine->jit_detail.arm_memory_ram = detail.arm_memory_ram;
+   engine->jit_detail.arm_memory_io = detail.arm_memory_io;
+   engine->jit_detail.arm_memory_video = detail.arm_memory_video;
+   engine->jit_detail.arm_memory_rom = detail.arm_memory_rom;
+   engine->jit_detail.arm_memory_save = detail.arm_memory_save;
+   engine->jit_detail.arm_memory_other = detail.arm_memory_other;
+   engine->jit_detail.arm_memory_stores = detail.arm_memory_stores;
+   engine->jit_detail.system_calls = detail.system_calls;
+   engine->jit_detail.rom_read_body_cycles = detail.rom_read_body_cycles;
+   engine->jit_detail.rom_read_body_calls = detail.rom_read_body_calls;
+   engine->jit_detail.rom_read_page_misses = detail.rom_read_page_misses;
+   engine->jit_detail.rom_read_bridge_cycles = detail.rom_read_bridge_cycles;
+   engine->jit_detail.rom_read_bridge_calls = detail.rom_read_bridge_calls;
+   engine->jit_detail.block_cycles.bios = detail.block_cycles.bios;
+   engine->jit_detail.block_cycles.ewram = detail.block_cycles.ewram;
+   engine->jit_detail.block_cycles.iwram = detail.block_cycles.iwram;
+   engine->jit_detail.block_cycles.rom = detail.block_cycles.rom;
+   engine->jit_detail.block_cycles.other = detail.block_cycles.other;
+   engine->jit_detail.block_ready_exits = detail.block_ready_exits;
+   engine->jit_detail.block_budget_exits = detail.block_budget_exits;
+   engine->jit_detail.block_halt_exits = detail.block_halt_exits;
+   engine->jit_detail.block_irq_alerts = detail.block_irq_alerts;
+   engine->jit_detail.block_smc_alerts = detail.block_smc_alerts;
+   engine->jit_detail.resume_candidates = detail.resume_candidates;
+   engine->jit_detail.resume_attempts = detail.resume_attempts;
+   engine->jit_detail.resume_successes = detail.resume_successes;
+   engine->jit_detail.resume_rejections = detail.resume_rejections;
+   struct gpsp_rv32_arm_video_memory_stats video_memory;
+   gpsp_rv32_arm_video_memory_get_stats(&video_memory);
+   memcpy(engine->arm_video_memory.calls, video_memory.calls,
+         sizeof(video_memory.calls));
+   memcpy(engine->arm_video_memory.cycles, video_memory.cycles,
+         sizeof(video_memory.cycles));
+   struct gpsp_rv32_arm_video_source_stats video_source;
+   gpsp_rv32_arm_video_source_get_stats(&video_source);
+   _Static_assert(sizeof(engine->arm_video_source) == sizeof(video_source),
+         "video source benchmark layout differs");
+   memcpy(&engine->arm_video_source, &video_source, sizeof(video_source));
+#endif
+   struct gpsp_rv32_fallback_histogram fallback;
+   gpsp_rv32_block_get_fallback_histogram(&fallback);
+   for (unsigned i = 0; i < 8; ++i)
+   {
+      engine->fallback_thumb_top[i].opcode_high_byte =
+            fallback.thumb[i].opcode_high_byte;
+      engine->fallback_thumb_top[i].steps = fallback.thumb[i].steps;
+      engine->fallback_arm_top[i].opcode_high_byte =
+            fallback.arm[i].opcode_high_byte;
+      engine->fallback_arm_top[i].steps = fallback.arm[i].steps;
+   }
+#endif
+}
+
+void gpsp_benchmark_take_hot_sites(
+      struct gpsp_benchmark_jit_hot_sites *sites)
+{
+   memset(sites, 0, sizeof(*sites));
+#if defined(GPSP_BENCHMARK_JIT_DETAIL) && defined(GPSP_RV32_JIT)
+   struct gpsp_rv32_hot_sites native;
+   gpsp_rv32_block_take_hot_sites(&native);
+   _Static_assert(sizeof(*sites) == sizeof(native),
+         "hot-site benchmark layout differs");
+   memcpy(sites, &native, sizeof(native));
+#endif
+}
+
+void gpsp_benchmark_get_lookup_totals(
+      struct gpsp_benchmark_jit_lookup_frame *totals)
+{
+   memset(totals, 0, sizeof(*totals));
+#if defined(GPSP_BENCHMARK_JIT_LOOKUP) && defined(GPSP_RV32_JIT)
+   struct gpsp_rv32_lookup_stats lookup;
+   gpsp_rv32_block_get_lookup_stats(&lookup);
+   totals->hit_calls = lookup.top_hit_calls;
+   totals->miss_calls = lookup.top_miss_calls;
+   totals->hit_cycles = lookup.top_hit_cycles;
+   totals->miss_cycles = lookup.top_miss_cycles;
+#endif
+}
+
+void gpsp_benchmark_reset_bios_probe(void)
+{
+#if defined(GPSP_BENCHMARK_JIT_DETAIL) && defined(GPSP_RV32_JIT)
+   gpsp_rv32_bios_probe_reset();
+#endif
+}
+
+void gpsp_benchmark_get_bios_probe(struct gpsp_benchmark_bios_probe *probe)
+{
+   memset(probe, 0, sizeof(*probe));
+#if defined(GPSP_BENCHMARK_JIT_DETAIL) && defined(GPSP_RV32_JIT)
+   struct gpsp_rv32_bios_probe_stats stats;
+   gpsp_rv32_bios_probe_get_stats(&stats);
+   _Static_assert(sizeof(*probe) == sizeof(stats),
+         "BIOS benchmark layout differs");
+   memcpy(probe, &stats, sizeof(stats));
+#endif
+}
+#endif
+
 #if defined(VITA) && defined(HAVE_DYNAREC)
 #include <psp2/kernel/sysmem.h>
 static int translation_caches_inited = 0;
@@ -72,6 +319,8 @@ static void gpsp_apply_sound_rate(const char *value, retro_environment_t reinit_
 
    sound_freq_bits = new_bits;
    sound_frequency = 1u << new_bits;
+   /* init_sound() ran at the old rate before the game's options load. */
+   sound_update_tick_step();
    audio_samples_per_frame   = (float)sound_frequency / (float)(GBA_FPS);
    audio_samples_accumulator = 0.0f;
 
@@ -579,9 +828,9 @@ void retro_get_system_info(struct retro_system_info* info)
    info->library_name = GPSP_NAME;
  #ifdef GIT_VERSION
    info->library_version = GPSP_VERSION "-" GIT_VERSION;
- #else
+#else
    info->library_version = GPSP_VERSION;
- #endif
+#endif
    info->need_fullpath = true;
    info->block_extract = false;
    info->valid_extensions = "gba|bin|agb|gbz|u1" ;
@@ -631,7 +880,7 @@ void retro_init(void)
       log_cb(RETRO_LOG_ERROR,
              "Failed to map the JIT translation cache; "
              "falling back to the interpreter\n");
-  #elif defined(_3DS)
+#elif defined(_3DS)
    if (__ctr_svchax && !translation_caches_inited)
    {
       uint32_t currentHandle;
@@ -653,7 +902,7 @@ void retro_init(void)
       ctr_flush_invalidate_cache();
       translation_caches_inited = 1;
    }
-  #elif defined(VITA)
+#elif defined(VITA)
    if(!translation_caches_inited){
       void* currentHandle;
 
@@ -678,7 +927,7 @@ void retro_init(void)
       sceKernelOpenVMDomain();
       translation_caches_inited = 1;
     }
-  #endif
+#endif
 #endif
 
    init_gamepak_buffer();
@@ -727,6 +976,9 @@ void retro_init(void)
 
 void retro_deinit(void)
 {
+#if defined(GPSP_RV32_JIT)
+   gpsp_rv32_block_deinit();
+#endif
    perf_cb.perf_log();
    memory_term();
 
@@ -928,7 +1180,7 @@ static void extract_directory(char* buf, const char* path, size_t size)
 static void check_variables(bool started_from_load)
 {
    struct retro_variable var;
-   bool frameskip_type_prev;
+   frameskip_type frameskip_type_prev;
    bool post_process_cc_prev;
    bool post_process_mix_prev;
 
@@ -1058,6 +1310,14 @@ static void check_variables(bool started_from_load)
       gpsp_apply_sound_rate(svar.value, sound_rate_configured ? environ_cb : NULL);
       sound_rate_configured = 1;
    }
+
+   var.key                = "gpsp_sound_headroom";
+   var.value              = 0;
+   sound_headroom_shift   = 0;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+       !strcmp(var.value, "6"))
+      sound_headroom_shift = 1;
 
 
    var.key                = "gpsp_frameskip";
@@ -1296,6 +1556,11 @@ bool retro_load_game(const struct retro_game_info* info)
       memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
    }
 
+#if defined(GPSP_RV32_JIT)
+   if (!gamepak_mini_materialized)
+      gpsp_rv32_block_init();
+#endif
+
 #ifdef HAVE_DYNAREC
    if (gamepak_mini_materialized && dynarec_enable)
    {
@@ -1326,6 +1591,9 @@ bool retro_load_game_special(unsigned game_type,
 
 void retro_unload_game(void)
 {
+#if defined(GPSP_RV32_JIT)
+   gpsp_rv32_block_deinit();
+#endif
    if (libretro_ff_enabled)
       set_fastforward_override(false);
 
@@ -1368,6 +1636,10 @@ size_t retro_get_memory_size(unsigned id)
 void retro_run(void)
 {
    bool updated = false;
+#if defined(GPSP_BENCHMARK)
+   retro_time_t phase_start_us;
+   retro_time_t phase_end_us;
+#endif
 
    input_poll_cb();
    update_input();
@@ -1445,16 +1717,38 @@ void retro_run(void)
    }
 
    /* This runs just a frame */
+#if defined(GPSP_BENCHMARK)
+   phase_start_us = perf_cb.get_time_usec();
+   gpsp_benchmark_timing_start(perf_cb.get_perf_counter);
+#if defined(GPSP_BENCHMARK_JIT_LOOKUP) && defined(GPSP_RV32_JIT)
+   gpsp_rv32_block_set_lookup_clock(perf_cb.get_perf_counter);
+#endif
+#endif
+#if defined(GPSP_RV32_JIT)
+   execute_arm_translate(frame_start_cycles());
+#else
    #ifdef HAVE_DYNAREC
    if (dynarec_enable)
-      execute_arm_translate(execute_cycles);
+      execute_arm_translate(frame_start_cycles());
    else
-   #endif
+#endif
    {
       /* Sticky bits only used in interpreter */
       clear_gamepak_stickybits();
-      execute_arm(execute_cycles);
+      execute_arm(frame_start_cycles());
    }
+#endif
+
+#if defined(GPSP_BENCHMARK)
+#if defined(GPSP_BENCHMARK_JIT_LOOKUP) && defined(GPSP_RV32_JIT)
+   gpsp_rv32_block_set_lookup_clock(NULL);
+#endif
+   gpsp_benchmark_timing_stop(&s_benchmark_frame.cpu);
+#if defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+   gpsp_benchmark_video_detail_get(&s_benchmark_frame.video_detail);
+#endif
+   s_benchmark_frame.execute_us = (uint32_t)(perf_cb.get_time_usec() - phase_start_us);
+#endif
 
    if (rumble_cb) {
      // TODO: Add some user-option to select a rumble policy
@@ -1463,8 +1757,19 @@ void retro_run(void)
      rumble_cb(0, RETRO_RUMBLE_STRONG, MIN(strength, 0xffff) / 2);
    }
 
+#if defined(GPSP_BENCHMARK)
+   phase_start_us = perf_cb.get_time_usec();
+#endif
    audio_run();
+#if defined(GPSP_BENCHMARK)
+   phase_end_us = perf_cb.get_time_usec();
+   s_benchmark_frame.audio_us = (uint32_t)(phase_end_us - phase_start_us);
+   phase_start_us = phase_end_us;
+#endif
    video_run();
+#if defined(GPSP_BENCHMARK)
+   s_benchmark_frame.video_us = (uint32_t)(perf_cb.get_time_usec() - phase_start_us);
+#endif
 
    switch (serial_mode) {
    case SERIAL_MODE_RFU:

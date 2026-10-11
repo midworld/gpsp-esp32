@@ -90,6 +90,9 @@
 }
 
 bool bson_contains_key(const u8 *srcp, const char *key, u8 keytype);
+bool bson_contains_bytes(const u8 *srcp, const char *key, unsigned cnt);
+bool bson_contains_doc(const u8 *srcp, const char *key);
+bool bson_contains_int32_array(const u8 *srcp, const char *key, unsigned cnt);
 const u8* bson_find_key(const u8 *srcp, const char *key);
 bool bson_read_int32(const u8 *srcp, const char *key, u32* value);
 bool bson_read_int32_array(const u8 *srcp, const char *key, u32* value, unsigned cnt);

@@ -162,6 +162,17 @@ struct retro_core_option_definition option_defs_us[] = {
       "32768"
    },
    {
+      "gpsp_sound_headroom",
+      "Sound Headroom (dB)",
+      "Lowers the mixed output before it is clipped. Real hardware clips loud mixes; 6 dB keeps most of them clean. Raise the system volume to match.",
+      {
+         { "0", NULL },
+         { "6", NULL },
+         { NULL, NULL },
+      },
+      "0"
+   },
+   {
       "gpsp_frameskip",
       "Frameskip",
       "Skip frames to avoid audio buffer under-run (crackling). Improves performance at the expense of visual smoothness. 'Auto' skips frames when advised by the frontend. 'Auto (Threshold)' utilises the 'Frameskip Threshold (%)' setting. 'Fixed Interval' utilises the 'Frameskip Interval' setting.",

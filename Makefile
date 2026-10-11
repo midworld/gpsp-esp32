@@ -77,8 +77,21 @@ LIBM		   := -lm
 CORE_DIR    := .
 LDFLAGS     :=
 
+# RV32 static core; the frontend supplies gpsp_rv32_platform_ops.
+ifeq ($(platform), rv32)
+	TARGET := libgpsp.a
+	STATIC_LINKING := 1
+	HAVE_DYNAREC := 0
+	CROSS_COMPILE ?= riscv32-unknown-elf-
+	CC = $(CROSS_COMPILE)gcc
+	CXX = $(CROSS_COMPILE)g++
+	AR = $(CROSS_COMPILE)ar
+	RV32_ARCH ?= rv32imac_zicsr_zifencei
+	RV32_ABI ?= ilp32
+	CFLAGS += -march=$(RV32_ARCH) -mabi=$(RV32_ABI)
+
 # Unix
-ifeq ($(platform), unix)
+else ifeq ($(platform), unix)
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
 	SHARED := -shared $(FORCE_32BIT) -Wl,--version-script=link.T

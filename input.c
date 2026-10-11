@@ -174,7 +174,8 @@ u32 update_input(void)
 
 bool input_check_savestate(const u8 *src)
 {
-  const u8 *p = bson_find_key(src, "input");
+  const u8 *p = bson_contains_doc(src, "input") ?
+                bson_find_key(src, "input") : NULL;
   /* Only 'prevkey' is required for backwards compatibility. The other
    * fields are optional and default to a safe state on load. */
   return (p && bson_contains_key(p, "prevkey", BSON_TYPE_INT32));

@@ -19,12 +19,16 @@
 
 
 #include "common.h"
+#if defined(GPSP_BENCHMARK)
+#include "gpsp_benchmark_timing.h"
+#endif
 
 direct_sound_struct direct_sound_channel[2];
 gbc_sound_struct gbc_sound_channel[4];
 
 u32 sound_frequency = GBA_SOUND_FREQUENCY;
 u32 sound_freq_bits = 16;
+u32 sound_headroom_shift;
 
 u32 sound_on;
 /* Mix bus. Accumulates all six channels at full 16-bit output scale
@@ -66,7 +70,13 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
 
   fixed8_24 fifo_fractional = ds->fifo_fractional;
   u32 buffer_index = ds->buffer_index;
+#if defined(GPSP_BENCHMARK_PHASE_WORK)
+  u32 start_buffer_index = buffer_index;
+#endif
   s32 current_sample, next_sample;
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_enter(GPSP_BENCHMARK_SOUND);
+#endif
 
   /* 8-bit FIFO samples placed at full 16-bit scale; x256 is exact, so no
    * precision is created or lost here, but the interpolator below now
@@ -155,6 +165,14 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
     if(dma[2].direct_sound_channel == channel)
       dma_transfer(2, &ret);
   }
+#if defined(GPSP_BENCHMARK)
+#if defined(GPSP_BENCHMARK_PHASE_WORK)
+  gpsp_benchmark_timing_sound_direct(
+   (buffer_index - start_buffer_index) & BUFFER_SIZE_MASK,
+   sample_status != DIRECT_SOUND_INACTIVE);
+#endif
+  gpsp_benchmark_timing_leave();
+#endif
   return ret;
 }
 
@@ -355,10 +373,6 @@ u32 gbc_sound_master_volume;
     update_tone_counters(envelope_op, sweep_op);                              \
   }                                                                           \
 
-#define gbc_noise_wrap_full 32767
-
-#define gbc_noise_wrap_half 126
-
 #define get_noise_sample_full()                                               \
   current_sample =                                                            \
    ((s32)(noise_table15[fp16_16_to_u32(sample_index) >> 5] <<                 \
@@ -426,6 +440,9 @@ void render_gbc_sound()
   u16 sound_status = read_ioreg(REG_SOUNDCNT_X) & 0xFFF0;
   const s8 *sample_data;
   u32 tick_delta = cpu_ticks - gbc_sound_last_cpu_ticks;
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_enter(GPSP_BENCHMARK_SOUND);
+#endif
   /* tick_delta * sound_frequency / GBC_BASE_RATE, in 16.16 fixed point.
    * Done in 64-bit integer so the result is exact and bit-reproducible
    * across toolchains/arches (the old float form depended on x87 vs SSE
@@ -435,7 +452,15 @@ void render_gbc_sound()
   fixed16_16 buffer_ticks = (fixed16_16)
    ((((u64)tick_delta * sound_frequency) << 16) / GBC_BASE_RATE_INT);
   if (!tick_delta)
+  {
+#if defined(GPSP_BENCHMARK)
+#if defined(GPSP_BENCHMARK_PHASE_WORK)
+    gpsp_benchmark_timing_sound_psg(0);
+#endif
+    gpsp_benchmark_timing_leave();
+#endif
     return;
+  }
 
   gbc_update_count++;
   gbc_sound_partial_ticks += fp16_16_fractional_part(buffer_ticks);
@@ -524,6 +549,12 @@ void render_gbc_sound()
   gbc_sound_last_cpu_ticks = cpu_ticks;
   gbc_sound_buffer_index =
    (gbc_sound_buffer_index + (buffer_ticks * 2)) % BUFFER_SIZE;
+#if defined(GPSP_BENCHMARK)
+#if defined(GPSP_BENCHMARK_PHASE_WORK)
+  gpsp_benchmark_timing_sound_psg(buffer_ticks);
+#endif
+  gpsp_benchmark_timing_leave();
+#endif
 }
 
 // Special thanks to blarrg for the LSFR frequency used in Meridian, as posted
@@ -598,10 +629,16 @@ void reset_sound(void)
   }
 }
 
+/* PSG length, envelope and sweep run at 256 Hz: 256 / sound_frequency in
+ * 16.16, i.e. 256 at 65536 Hz and 512 at 32768 Hz. */
+void sound_update_tick_step(void)
+{
+  gbc_sound_tick_step = (fixed16_16)(1u << (24 - sound_freq_bits));
+}
+
 void init_sound()
 {
-  /* 256 / sound_frequency in 16.16 == 256 (sound_frequency == 2^16). */
-  gbc_sound_tick_step = (fixed16_16)256u;
+  sound_update_tick_step();
 
   init_noise_table(noise_table15, 32767, 14);
   init_noise_table(noise_table7, 127, 6);
@@ -628,42 +665,78 @@ bool sound_check_savestate(const u8 *src)
   };
 
   int i;
-  const u8 *snddoc = bson_find_key(src, "sound");
-  if (!snddoc)
+  if (!bson_contains_doc(src, "sound"))
     return false;
+  const u8 *snddoc = bson_find_key(src, "sound");
 
   for (i = 0; i < sizeof(gvars)/sizeof(gvars[0]); i++)
     if (!bson_contains_key(snddoc, gvars[i], BSON_TYPE_INT32))
       return false;
-  if (!bson_contains_key(snddoc, "wav-samples", BSON_TYPE_BIN))
+  if (!bson_contains_bytes(snddoc, "wav-samples", sizeof(wave_samples)))
     return false;
+
+  /* Values used as indexes or shift counts are checked here, before any
+     state is replaced: the mix ring (stereo pairs) and volume tables. */
+  {
+    u32 base, idx, left, right, master;
+    bson_read_int32(snddoc, "buf-base", &base);
+    bson_read_int32(snddoc, "gbc-buf-idx", &idx);
+    bson_read_int32(snddoc, "gbc-ms-vol-left", &left);
+    bson_read_int32(snddoc, "gbc-ms-vol-right", &right);
+    bson_read_int32(snddoc, "gbc-ms-vol", &master);
+    if (base >= BUFFER_SIZE || idx >= BUFFER_SIZE || (idx & 1) ||
+        left >= 8 || right >= 8 || master >= 4)
+      return false;
+  }
 
 
   for (i = 0; i < 2; i++)
   {
     char tn[4] = {'d', 's', '0' + i, 0};
-    const u8 *sndchan = bson_find_key(snddoc, tn);
-    if (!sndchan)
+    if (!bson_contains_doc(snddoc, tn))
       return false;
+    const u8 *sndchan = bson_find_key(snddoc, tn);
 
-    for (i = 0; i < sizeof(dsvars)/sizeof(dsvars[0]); i++)
-      if (!bson_contains_key(sndchan, dsvars[i], BSON_TYPE_INT32))
+    /* Own index: reusing i ended the channel loop after the first. */
+    for (int j = 0; j < sizeof(dsvars)/sizeof(dsvars[0]); j++)
+      if (!bson_contains_key(sndchan, dsvars[j], BSON_TYPE_INT32))
         return false;
 
-    if (!bson_contains_key(sndchan, "fifo-bytes", BSON_TYPE_BIN))
+    if (!bson_contains_bytes(sndchan, "fifo-bytes",
+          sizeof(direct_sound_channel[0].fifo)))
+      return false;
+
+    /* FIFO positions, the volume shift and the mix ring index. */
+    u32 fbase, ftop, vol, idx;
+    bson_read_int32(sndchan, "fifo-base", &fbase);
+    bson_read_int32(sndchan, "fifo-top", &ftop);
+    bson_read_int32(sndchan, "volume", &vol);
+    bson_read_int32(sndchan, "buf-idx", &idx);
+    if (fbase >= 32 || ftop >= 32 || vol > 1 || idx >= BUFFER_SIZE ||
+        (idx & 1))
       return false;
   }
 
   for (i = 0; i < 4; i++)
   {
     char tn[4] = {'g', 's', '0' + i, 0};
-    const u8 *sndchan = bson_find_key(snddoc, tn);
-    if (!sndchan)
+    if (!bson_contains_doc(snddoc, tn))
       return false;
+    const u8 *sndchan = bson_find_key(snddoc, tn);
 
-    for (i = 0; i < sizeof(gsvars)/sizeof(gsvars[0]); i++)
-      if (!bson_contains_key(sndchan, gsvars[i], BSON_TYPE_INT32))
+    for (int j = 0; j < sizeof(gsvars)/sizeof(gsvars[0]); j++)
+      if (!bson_contains_key(sndchan, gsvars[j], BSON_TYPE_INT32))
         return false;
+
+    /* Duty and envelope tables, the sweep shift (3 bits) and the rate
+       (11 bits; steps divide by 2048 - rate). */
+    u32 table, env, shift, rate;
+    bson_read_int32(sndchan, "sample-tbl", &table);
+    bson_read_int32(sndchan, "env-vol", &env);
+    bson_read_int32(sndchan, "sweep-shift", &shift);
+    bson_read_int32(sndchan, "rate", &rate);
+    if (table >= 4 || env >= 16 || shift > 7 || rate >= 2048)
+      return false;
   }
 
   return true;
@@ -697,7 +770,6 @@ bool sound_read_savestate(const u8 *src)
     bson_read_int32(snddoc, "gbc-ms-vol", &gbc_sound_master_volume) &&
     bson_read_bytes(snddoc, "wav-samples", wave_samples, sizeof(wave_samples))))
     return false;
-
   for (i = 0; i < 2; i++)
   {
     direct_sound_struct *ds = &direct_sound_channel[i];
@@ -749,6 +821,15 @@ bool sound_read_savestate(const u8 *src)
       bson_read_int32(sndchan, "noise-type", &gs->noise_type) &&
       bson_read_int32(sndchan, "sample-tbl", &gs->sample_table_idx)))
       return false;
+    /* The noise position indexes the table of the current width. A
+       stopped channel may keep a 15-bit position after a switch to 7 bits
+       (a retrigger clears it): wrap it instead of failing the load. */
+    if (i == 3)
+    {
+      fixed16_16 wrap = u32_to_fp16_16(gs->noise_type == 1 ?
+            gbc_noise_wrap_half : gbc_noise_wrap_full);
+      gs->sample_index %= wrap;
+    }
   }
 
   return true;
@@ -847,7 +928,7 @@ u32 sound_read_samples(s16 *out, u32 frames)
    for(i = 0; i < samples_to_read; i++)
    {
       u32 source_index   = (sound_buffer_base + i) & BUFFER_SIZE_MASK;
-      s32 current_sample = sound_buffer[source_index];
+      s32 current_sample = sound_buffer[source_index] >> sound_headroom_shift;
 
       sound_buffer[source_index] = 0;
 

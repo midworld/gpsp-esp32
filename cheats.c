@@ -61,6 +61,9 @@ static void update_hook_codebreaker(cheat_type *cheat)
         #ifdef HAVE_DYNAREC
         if (cheat_master_hook != pcaddr)
            flush_dynarec_caches();   /* Flush caches to install hook */
+        #elif defined(GPSP_RV32_JIT)
+        if (gpsp_rv32_rom_arena.count && cheat_master_hook != pcaddr)
+           flush_translation_cache_rom();
         #endif
         cheat_master_hook = pcaddr;
         return;   /* Only support for one hook */
@@ -206,6 +209,10 @@ void cheat_clear()
     * iterating over inactive slots from the previous game's cheat set,
     * wasting cycles on every vblank. */
    max_cheat = 0;
+#if defined(GPSP_RV32_JIT)
+   if (gpsp_rv32_rom_arena.count && cheat_master_hook != 0xffffffff)
+      flush_translation_cache_rom();
+#endif
    cheat_master_hook = 0xffffffff;
 }
 
@@ -287,5 +294,3 @@ cheat_error cheat_parse(unsigned index, const char *code)
    /* TODO parse other types here */
    return CheatErrorNotSupported;
 }
-
-
