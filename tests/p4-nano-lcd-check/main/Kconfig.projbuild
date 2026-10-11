@@ -1,0 +1,28 @@
+# Copyright (C) 2026 Midworld Kim
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+menu "P4 Nano LCD check"
+
+    config LCD_TEST_SECONDS
+        int "Seconds per SPI speed"
+        range 5 60
+        default 10
+
+    config LCD_TEST_BGR
+        bool "Use BGR color order"
+        default n
+        help
+            Enable if the red and blue test bars are exchanged.
+
+    config LCD_TEST_INVERT_COLORS
+        bool "Enable panel color inversion"
+        default y
+        help
+            Most ST7789 IPS panels require inversion. Disable if the
+            test colors or the black border appear inverted.
+
+    config LCD_TEST_ROTATE_180
+        bool "Rotate landscape output by 180 degrees"
+        default n
+
+endmenu

@@ -1,0 +1,40 @@
+# Copyright (C) 2026 Midworld Kim
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+menu "P4 Nano board check"
+
+    config P4_NANO_WIFI_SCAN
+        bool "Run active Wi-Fi scan (requires attached antenna)"
+        default n
+
+    config P4_NANO_WIFI_SPEED_TEST
+        bool "Connect to Wi-Fi and run iperf3 TCP throughput (requires antenna)"
+        default n
+
+    if P4_NANO_WIFI_SPEED_TEST
+
+    config P4_NANO_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+
+    config P4_NANO_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config P4_NANO_IPERF3_HOST
+        string "iperf3 server IPv4 address"
+        default ""
+
+    config P4_NANO_IPERF3_PORT
+        int "iperf3 server TCP port"
+        range 1 65535
+        default 5201
+
+    config P4_NANO_IPERF3_SECONDS
+        int "Seconds per direction"
+        range 1 60
+        default 10
+
+    endif
+
+endmenu

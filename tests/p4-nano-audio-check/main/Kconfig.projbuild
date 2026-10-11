@@ -1,0 +1,54 @@
+# Copyright (C) 2026 Midworld Kim
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+menu "P4 Nano audio check"
+
+    choice AUDIO_TEST_OUTPUT
+        prompt "I2S output sample rate"
+        default AUDIO_TEST_OUTPUT_48000
+
+        config AUDIO_TEST_OUTPUT_48000
+            bool "48,000 Hz"
+
+        config AUDIO_TEST_OUTPUT_32768
+            bool "32,768 Hz"
+
+    endchoice
+
+    config AUDIO_TEST_OUTPUT_RATE
+        int
+        default 32768 if AUDIO_TEST_OUTPUT_32768
+        default 48000
+
+    config AUDIO_TEST_AMPLITUDE
+        int "Peak test sample amplitude"
+        range 256 8000
+        default 3000
+
+    config AUDIO_TEST_VOLUME_DB
+        int "Default DAC volume (dB)"
+        range -30 0
+        default -12
+
+    config AUDIO_TEST_LONG_SECONDS
+        int "Seconds for the continuous playback test"
+        range 10 120
+        default 30
+
+    config AUDIO_TEST_INJECT_STALL
+        bool "Test an intentional 120 ms producer stall"
+        default y
+        help
+            Expect a short gap during this stage. The test checks that
+            buffer shortage is counted and playback recovers.
+
+    config AUDIO_TEST_REPEAT
+        bool "Repeat the full test sequence"
+        default n
+
+    config AUDIO_TEST_RECOVERY_ONLY
+        bool "Run only the stall and recovery stages"
+        depends on AUDIO_TEST_INJECT_STALL
+        default n
+
+endmenu
