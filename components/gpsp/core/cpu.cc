@@ -21,6 +21,15 @@ extern "C" {
   #include "common.h"
   #include "cpu_instrument.h"
 }
+#ifdef GPSP_RV32_JIT
+#include "riscv/rv32_stub.h"
+extern "C" {
+#include "riscv/rv32_thumb_memory.h"
+}
+#endif
+#if defined(GPSP_RV32_JIT) && defined(GPSP_BENCHMARK)
+#include "riscv/rv32_block_runtime.h"
+#endif
 
 const u8 bit_count[256] =
 {
@@ -346,7 +355,7 @@ static const u8 gba_header_logo[156] = {
     case 0x7:                                                                 \
     {                                                                         \
       get_shift_register(reg_sh);                                             \
-      ror(reg_sh, reg_sh, shift);                                             \
+      ror(reg_sh, reg_sh, shift & 0x1F);                                      \
       break;                                                                  \
     }                                                                         \
   }                                                                           \
@@ -497,8 +506,9 @@ static const u8 gba_header_logo[156] = {
       get_shift_register(reg_sh);                                             \
       if(shift != 0)                                                          \
       {                                                                       \
-        c_flag = (reg_sh >> (shift - 1)) & 0x01;                              \
-        ror(reg_sh, reg_sh, shift);                                           \
+        /* Multiples of 32 keep the value but update C. */                  \
+        c_flag = (reg_sh >> ((shift - 1) & 0x1F)) & 0x01;                     \
+        ror(reg_sh, reg_sh, shift & 0x1F);                                    \
       }                                                                       \
       break;                                                                  \
     }                                                                         \
@@ -605,14 +615,11 @@ static const u8 gba_header_logo[156] = {
 // probably not worth optimizing for.
 
 #define check_for_interrupts()                                                \
-  if((read_ioreg(REG_IE) & read_ioreg(REG_IF)) &&                             \
-   read_ioreg(REG_IME) && ((reg[REG_CPSR] & 0x80) == 0))                      \
+  if(check_and_raise_interrupts())                                            \
   {                                                                           \
-    REG_MODE(MODE_IRQ)[6] = reg[REG_PC] + 4;                                  \
-    REG_SPSR(MODE_IRQ) = reg[REG_CPSR];                                       \
-    reg[REG_CPSR] = 0xD2;                                                     \
-    reg[REG_PC] = 0x00000018;                                                 \
-    set_cpu_mode(MODE_IRQ);                                                   \
+    cycles_remaining -= take_irq_entry_cycles();                              \
+    if(cycles_remaining <= 0)                                                 \
+      goto alert;                                                             \
     goto arm_loop;                                                            \
   }                                                                           \
 
@@ -1008,6 +1015,18 @@ const u32 spsr_masks[4] = { 0x00000000, 0x000000EF, 0xF0000000, 0xF00000EF };
 typedef enum { AccLoad, AccStore } AccMode;
 typedef enum { AddrPreInc, AddrPreDec, AddrPostInc, AddrPostDec } AddrMode;
 
+// S-bit transfers use the user register bank, but their base register stays
+// in the current mode. The FIQ bank also covers r8-r12.
+inline u32 &arm_block_transfer_reg(u32 index, bool user_bank) {
+  if (user_bank &&
+      ((index >= 8 && index <= 12 && reg[CPU_MODE] == MODE_FIQ) ||
+       (index >= REG_SP && index <= REG_LR &&
+        reg[CPU_MODE] != MODE_USER && reg[CPU_MODE] != MODE_SYSTEM)))
+    return REG_MODE(MODE_USER)[index - 8];
+
+  return reg[index];
+}
+
 template<AccMode mode, bool writeback, bool sbit, AddrMode addr_mode>
 inline cpu_alert_type exec_arm_block_mem(u32 rn, u32 reglist, s32 &cycles_remaining) {
   cpu_alert_type cpu_alert = CPU_ALERT_NONE;
@@ -1026,12 +1045,9 @@ inline cpu_alert_type exec_arm_block_mem(u32 rn, u32 reglist, s32 &cycles_remain
                 (addr_mode == AddrPreDec)  ? endaddr : endaddr + 4;
   address &= ~3U;
 
-  // If sbit is set, change to user mode and back, so to write the user regs.
-  // However for LDM {PC} we restore CPSR from SPSR.
-  // TODO: implement CPSR restore, only USER mode is now implemented.
-  u32 old_cpsr = reg[REG_CPSR];
-  if (sbit && (mode == AccStore || rn != REG_PC))
-    set_cpu_mode(MODE_USER);
+  // LDM^ with PC uses the current bank and restores CPSR after the transfer.
+  // Other S-bit transfers use user registers, independent of the base bank.
+  bool user_bank = sbit && (mode == AccStore || !(reglist & (1U << REG_PC)));
 
   // If base is in the reglist and writeback is enabled, the value of the
   // written register depends on the write cycle (ARM7TDM manual 4.11.6).
@@ -1050,9 +1066,13 @@ inline cpu_alert_type exec_arm_block_mem(u32 rn, u32 reglist, s32 &cycles_remain
   for (u32 i = 0; i < 16; i++)  {
     if ((reglist >> i) & 0x01) {
       if (mode == AccLoad) {
-        load_aligned32(address, reg[i]);
+        u32 value;
+        load_aligned32(address, value);
+        arm_block_transfer_reg(i, user_bank) = value;
       } else {
-        store_aligned32(address, (i == REG_PC) ? reg[REG_PC] + 4 : reg[i]);
+        // PC was advanced by 4 above; STM stores instruction PC+12.
+        store_aligned32(address, (i == REG_PC) ? reg[REG_PC] + 8 :
+                        arm_block_transfer_reg(i, user_bank));
       }
       address += 4;
     }
@@ -1060,9 +1080,6 @@ inline cpu_alert_type exec_arm_block_mem(u32 rn, u32 reglist, s32 &cycles_remain
 
   if (writeback && !writeback_first)
     reg[rn] = endaddr;
-
-  if (sbit && (mode == AccStore || rn != REG_PC))
-    set_cpu_mode(cpu_modes[old_cpsr & 0xF]);
 
   return cpu_alert;
 }
@@ -1130,6 +1147,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   u32 temp;                                                                   \
   load_memory_##type(reg[rn], temp);                                          \
   store_memory_##type(reg[rn], reg[rm]);                                      \
+  cycles_remaining--;                                                         \
   reg[rd] = temp;                                                             \
   arm_pc_offset(4);                                                           \
 }                                                                             \
@@ -1186,9 +1204,10 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
 // Decode types: shift, alu_op
 // Operation types: lsl, lsr, asr, ror
 // Affects N/Z/C flags
+// Register shifts use only Rs[7:0].
 
 #define thumb_shift_lsl_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;                                                 \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
@@ -1208,7 +1227,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   }                                                                           \
 
 #define thumb_shift_lsr_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;                                                 \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
@@ -1228,7 +1247,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   }                                                                           \
 
 #define thumb_shift_asr_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;                                                 \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
@@ -1245,12 +1264,12 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   }                                                                           \
 
 #define thumb_shift_ror_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;                                                 \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
-    c_flag = (dest >> (shift - 1)) & 0x01;                                    \
-    ror(dest, dest, shift);                                                   \
+    c_flag = (dest >> ((shift - 1) & 0x1F)) & 0x01;                           \
+    ror(dest, dest, shift & 0x1F);                                            \
   }                                                                           \
 
 #define thumb_shift_lsl_imm()                                                 \
@@ -1381,11 +1400,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   cycles_remaining -= ws_cyc_nseq[reg[REG_PC] >> 24][0];                      \
 }                                                                             \
 
-// When a mode change occurs from non-FIQ to non-FIQ retire the current
-// reg[13] and reg[14] into reg_mode[cpu_mode][5] and reg_mode[cpu_mode][6]
-// respectively and load into reg[13] and reg[14] reg_mode[new_mode][5] and
-// reg_mode[new_mode][6]. When swapping to/from FIQ retire/load reg[8]
-// through reg[14] to/from reg_mode[MODE_FIQ][0] through reg_mode[MODE_FIQ][6].
+// r8-r12 are shared by all modes except FIQ. r13-r14 have separate banks.
 
 const u32 cpu_modes[16] =
 {
@@ -1407,28 +1422,33 @@ void set_cpu_mode(cpu_mode_type new_mode)
   if(cpu_mode == new_mode)
      return;
 
-  if(new_mode == MODE_FIQ)
-  {
-     for (u32 i = 8; i < 15; i++)
-        REG_MODE(cpu_mode)[i - 8] = reg[i];
-  }
-  else
-  {
-     REG_MODE(cpu_mode)[5] = reg[REG_SP];
-     REG_MODE(cpu_mode)[6] = reg[REG_LR];
-  }
-
   if(cpu_mode == MODE_FIQ)
   {
-     for (u32 i = 8; i < 15; i++)
-        reg[i] = REG_MODE(new_mode)[i - 8];
+     for (u32 i = 8; i < 13; i++)
+        REG_MODE(MODE_FIQ)[i - 8] = reg[i];
   }
-  else
+  else if(new_mode == MODE_FIQ)
   {
-     reg[REG_SP] = REG_MODE(new_mode)[5];
-     reg[REG_LR] = REG_MODE(new_mode)[6];
+     for (u32 i = 8; i < 13; i++)
+        REG_MODE(MODE_USER)[i - 8] = reg[i];
   }
 
+  REG_MODE(cpu_mode)[5] = reg[REG_SP];
+  REG_MODE(cpu_mode)[6] = reg[REG_LR];
+
+  if(new_mode == MODE_FIQ)
+  {
+     for (u32 i = 8; i < 13; i++)
+        reg[i] = REG_MODE(MODE_FIQ)[i - 8];
+  }
+  else if(cpu_mode == MODE_FIQ)
+  {
+     for (u32 i = 8; i < 13; i++)
+        reg[i] = REG_MODE(MODE_USER)[i - 8];
+  }
+
+  reg[REG_SP] = REG_MODE(new_mode)[5];
+  reg[REG_LR] = REG_MODE(new_mode)[6];
   reg[CPU_MODE] = new_mode;
 }
 
@@ -1440,6 +1460,10 @@ void set_cpu_mode(cpu_mode_type new_mode)
 cpu_alert_type check_interrupt() {
   return (cpu_has_interrupt()) ? CPU_ALERT_IRQ : CPU_ALERT_NONE;
 }
+
+/* IRQ entry refills the pipeline at the BIOS vector (2S + 1N). */
+#define IRQ_ENTRY_CYCLES 3
+u32 irq_entry_cycles = 0;
 
 // Checks for pending IRQs and raises them. This changes the CPU mode
 // which means that it must be called with a valid CPU state.
@@ -1458,6 +1482,7 @@ u32 check_and_raise_interrupts()
     reg[REG_PC] = 0x00000018;
 
     set_cpu_mode(MODE_IRQ);
+    irq_entry_cycles += IRQ_ENTRY_CYCLES;
 
     // Wake up CPU if it is stopped/sleeping.
     if (reg[CPU_HALT_STATE] == CPU_STOP ||
@@ -1493,13 +1518,126 @@ u8 *memory_map_read [8 * 1024];
 u16 oam_ram[512];
 u16 palette_ram[512];
 u16 palette_ram_converted[512];
+#if defined(PALETTE_EXPANDED)
+u32 palette_ram_expanded[512];
+#endif
 u8 ewram[1024 * 256 * 2];
 u8 iwram[1024 * 32 * 2];
 u8 vram[1024 * 96];
 u16 io_registers[512];
 #endif
 
-static u32 execute_arm_internal(u32 cycles, bool vram_only)
+#if defined(GPSP_RV32_JIT) && defined(GPSP_BENCHMARK)
+static struct gpsp_rv32_interpreter_stats rv32_interpreter_stats;
+static uint32_t rv32_fallback_high_byte[2][256];
+static uint32_t rv32_fallback_unknown[2];
+
+extern "C" void gpsp_rv32_block_get_fallback_histogram(
+    struct gpsp_rv32_fallback_histogram *stats)
+{
+  memset(stats, 0, sizeof(*stats));
+  stats->unknown_thumb = rv32_fallback_unknown[0];
+  stats->unknown_arm = rv32_fallback_unknown[1];
+  for (unsigned mode = 0; mode < 2; mode++)
+  {
+    struct gpsp_rv32_fallback_bucket *top = mode ? stats->arm : stats->thumb;
+    for (unsigned opcode = 0; opcode < 256; opcode++)
+    {
+      uint32_t count = rv32_fallback_high_byte[mode][opcode];
+      for (unsigned i = 0; i < 8 && count; i++)
+      {
+        if (count > top[i].steps)
+        {
+          for (unsigned j = 7; j > i; j--)
+            top[j] = top[j - 1];
+          top[i].opcode_high_byte = (uint8_t)opcode;
+          top[i].steps = count;
+          break;
+        }
+      }
+    }
+  }
+}
+
+extern "C" void gpsp_rv32_block_get_interpreter_stats(
+    struct gpsp_rv32_interpreter_stats *stats)
+{
+  *stats = rv32_interpreter_stats;
+}
+
+extern "C" void gpsp_rv32_block_reset_interpreter_stats(void)
+{
+  memset(&rv32_interpreter_stats, 0, sizeof(rv32_interpreter_stats));
+  memset(rv32_fallback_high_byte, 0, sizeof(rv32_fallback_high_byte));
+  memset(rv32_fallback_unknown, 0, sizeof(rv32_fallback_unknown));
+}
+
+extern "C" void gpsp_rv32_block_note_direct_step(void)
+{
+  rv32_interpreter_stats.direct_steps++;
+}
+
+static inline void rv32_count_interpreter_pc(u32 pc, bool generated)
+{
+  u32 region = pc >> 24;
+  if (generated)
+  {
+    rv32_interpreter_stats.generated_steps++;
+    if (reg[REG_CPSR] & 0x20)
+      rv32_interpreter_stats.generated_thumb++;
+    else
+      rv32_interpreter_stats.generated_arm++;
+  }
+  else
+    rv32_interpreter_stats.bulk_steps++;
+
+  uint64_t *bios = generated ? &rv32_interpreter_stats.generated_bios :
+      &rv32_interpreter_stats.bulk_bios;
+  uint64_t *ewram = generated ? &rv32_interpreter_stats.generated_ewram :
+      &rv32_interpreter_stats.bulk_ewram;
+  uint64_t *iwram = generated ? &rv32_interpreter_stats.generated_iwram :
+      &rv32_interpreter_stats.bulk_iwram;
+  uint64_t *rom = generated ? &rv32_interpreter_stats.generated_rom :
+      &rv32_interpreter_stats.bulk_rom;
+  uint64_t *other = generated ? &rv32_interpreter_stats.generated_other :
+      &rv32_interpreter_stats.bulk_other;
+  if (pc < 0x4000)
+    ++*bios;
+  else if (region == 0x02)
+    ++*ewram;
+  else if (region == 0x03)
+    ++*iwram;
+  else if (region >= 0x08 && region <= 0x0d)
+    ++*rom;
+  else
+    ++*other;
+}
+
+static inline void rv32_count_fallback_opcode(u32 pc)
+{
+  bool thumb = (reg[REG_CPSR] & 0x20) != 0;
+  unsigned mode = thumb ? 0 : 1;
+  if (pc >= 0x10000000 || !memory_map_read[pc >> 15])
+  {
+    rv32_fallback_unknown[mode]++;
+    return;
+  }
+  u8 *page = memory_map_read[pc >> 15];
+  u32 opcode = thumb ? readaddress16(page, pc & 0x7fff) :
+      readaddress32(page, pc & 0x7fff);
+  rv32_fallback_high_byte[mode][opcode >> (thumb ? 8 : 24)]++;
+}
+#endif
+
+static inline bool rv32_jit_fetch_pc(u32 pc)
+{
+  u32 region = pc >> 24;
+  return pc < 0x4000 || region == 0x02 || region == 0x03 ||
+      (region >= 0x08 && region <= 0x0d);
+}
+
+template <bool single_instruction, bool stop_at_jit = false>
+static u32 execute_arm_internal(u32 cycles, bool vram_only, u64 *steps = NULL)
 {
   u32 opcode;
   u32 condition;
@@ -1510,6 +1648,7 @@ static u32 execute_arm_internal(u32 cycles, bool vram_only)
   s32 cycles_remaining;
   u32 update_ret;
   cpu_alert_type cpu_alert;
+  bool instruction_started = false;
 
   if(!pc_address_block)
     pc_address_block = load_gamepak_page(pc_region & 0x3FF);
@@ -1518,8 +1657,12 @@ static u32 execute_arm_internal(u32 cycles, bool vram_only)
   cycles_remaining = cycles;
   while(1)
   {
-    /* Do not execute until CPU is active */
-    if (reg[CPU_HALT_STATE] != CPU_ACTIVE) {
+    if ((single_instruction || stop_at_jit) && (cycles_remaining <= 0 ||
+        reg[CPU_HALT_STATE] != CPU_ACTIVE))
+      return (u32)cycles_remaining;
+
+    /* Do not execute until CPU is active and has budget left */
+    while (reg[CPU_HALT_STATE] != CPU_ACTIVE || cycles_remaining <= 0) {
        u32 ret = update_gba(cycles_remaining);
        if (completed_frame(ret))
           return ret;
@@ -1538,6 +1681,10 @@ static u32 execute_arm_internal(u32 cycles, bool vram_only)
 arm_loop:
 
        collapse_flags();
+       if (single_instruction && instruction_started)
+          return (u32)cycles_remaining;
+       if (stop_at_jit && rv32_jit_fetch_pc(reg[REG_PC]))
+          return (u32)cycles_remaining;
        if (vram_only && (reg[REG_PC] >> 24) != 0x06)
           return cycles_remaining > 0 ? (u32)cycles_remaining : update_gba(cycles_remaining);
 
@@ -1546,9 +1693,17 @@ arm_loop:
           process_cheats();
 
        /* Execute ARM instruction */
+       if (stop_at_jit)
+       {
+          ++*steps;
+#if defined(GPSP_RV32_JIT) && defined(GPSP_BENCHMARK)
+          rv32_count_interpreter_pc(reg[REG_PC], false);
+#endif
+       }
        using_instruction(arm);
        check_pc_region();
        reg[REG_PC] &= ~0x03;
+       instruction_started = true;
        opcode = readaddress32(pc_address_block, (reg[REG_PC] & 0x7FFF));
        condition = opcode >> 28;
 
@@ -1646,7 +1801,7 @@ arm_loop:
 
        #ifdef TRACE_INSTRUCTIONS
        interp_trace_instruction(reg[REG_PC], 1);
-       #endif
+#endif
 
        switch((opcode >> 20) & 0xFF)
        {
@@ -3087,11 +3242,28 @@ skip_instruction:
 
        if (reg[REG_PC] == idle_loop_target_pc && cycles_remaining > 0) cycles_remaining = 0;
 
+       if (single_instruction) {
+          collapse_flags();
+#if defined(GPSP_RV32_JIT)
+          gpsp_rv32_add_memory_alert(cpu_alert);
+#endif
+          return (u32)cycles_remaining;
+       }
+
+#if defined(GPSP_RV32_JIT)
+       if (cpu_alert & CPU_ALERT_SMC)
+          invalidate_translation_cache_ram();
+#endif
        if (cpu_alert & (CPU_ALERT_HALT | CPU_ALERT_IRQ))
          goto alert;
 
     } while(cycles_remaining > 0);
 
+    if (stop_at_jit)
+    {
+       collapse_flags();
+       return (u32)cycles_remaining;
+    }
     collapse_flags();
     update_ret = update_gba(cycles_remaining);
     if (completed_frame(update_ret))
@@ -3104,6 +3276,10 @@ skip_instruction:
 thumb_loop:
 
        collapse_flags();
+       if (single_instruction && instruction_started)
+          return (u32)cycles_remaining;
+       if (stop_at_jit && rv32_jit_fetch_pc(reg[REG_PC]))
+          return (u32)cycles_remaining;
        if (vram_only && (reg[REG_PC] >> 24) != 0x06)
           return cycles_remaining > 0 ? (u32)cycles_remaining : update_gba(cycles_remaining);
 
@@ -3113,14 +3289,22 @@ thumb_loop:
 
        /* Execute THUMB instruction */
 
+       if (stop_at_jit)
+       {
+          ++*steps;
+#if defined(GPSP_RV32_JIT) && defined(GPSP_BENCHMARK)
+          rv32_count_interpreter_pc(reg[REG_PC], false);
+#endif
+       }
        using_instruction(thumb);
        check_pc_region();
        reg[REG_PC] &= ~0x01;
+       instruction_started = true;
        opcode = readaddress16(pc_address_block, (reg[REG_PC] & 0x7FFF));
 
        #ifdef TRACE_INSTRUCTIONS
        interp_trace_instruction(reg[REG_PC], 0);
-       #endif
+#endif
 
        switch((opcode >> 8) & 0xFF)
        {
@@ -3569,11 +3753,28 @@ thumb_loop:
 
        if (reg[REG_PC] == idle_loop_target_pc && cycles_remaining > 0) cycles_remaining = 0;
 
+       if (single_instruction) {
+          collapse_flags();
+#if defined(GPSP_RV32_JIT)
+          gpsp_rv32_add_memory_alert(cpu_alert);
+#endif
+          return (u32)cycles_remaining;
+       }
+
+#if defined(GPSP_RV32_JIT)
+       if (cpu_alert & CPU_ALERT_SMC)
+          invalidate_translation_cache_ram();
+#endif
        if (cpu_alert & (CPU_ALERT_HALT | CPU_ALERT_IRQ))
           goto alert;
 
     } while(cycles_remaining > 0);
 
+    if (stop_at_jit)
+    {
+       collapse_flags();
+       return (u32)cycles_remaining;
+    }
     collapse_flags();
     update_ret = update_gba(cycles_remaining);
     if (completed_frame(update_ret))
@@ -3589,8 +3790,51 @@ thumb_loop:
 
 void execute_arm(u32 cycles)
 {
-  execute_arm_internal(cycles, false);
+  execute_arm_internal<false>(cycles, false);
 }
+
+#ifdef GPSP_RV32_JIT
+s32 execute_arm_one(s32 cycles)
+{
+  return (s32)execute_arm_internal<true>((u32)cycles, false);
+}
+
+s32 execute_arm_until_jit(s32 cycles, u64 *steps)
+{
+#if defined(GPSP_BENCHMARK)
+  rv32_interpreter_stats.bulk_runs++;
+#endif
+  return (s32)execute_arm_internal<false, true>((u32)cycles, false, steps);
+}
+
+static void rv32_helper_invalid(const char *helper, const uint32_t *registers,
+    const uint32_t *cycles, u32 arg0, u32 arg1)
+{
+  printf("RV32 helper %s invalid: regs %p expected %p cycles %p "
+         "PC %08x CPSR %08x args %08x %08x\n", helper,
+         (const void *)registers, (const void *)reg,
+         (const void *)cycles, reg[REG_PC], reg[REG_CPSR], arg0, arg1);
+  fflush(stdout);
+  abort();
+}
+
+extern "C" uint64_t gpsp_rv32_interpret_one_helper(uint32_t *registers,
+    uint32_t *cycles, uint32_t arg0, uint32_t arg1)
+{
+  if ((void *)registers != (void *)reg || !cycles)
+    rv32_helper_invalid("interpret", registers, cycles, arg0, arg1);
+
+#if defined(GPSP_BENCHMARK)
+  rv32_count_interpreter_pc(reg[REG_PC], true);
+  rv32_count_fallback_opcode(reg[REG_PC]);
+#endif
+  *cycles = (uint32_t)execute_arm_one((s32)*cycles);
+  /* An interpreted instruction may branch, change mode or write code RAM.
+   * End this generated block even when it merely advances to the next PC. */
+  return GPSP_RV32_HELPER_EXIT;
+}
+
+#endif
 
 u32 function_cc execute_arm_vram(u32 cycles)
 {
@@ -3600,9 +3844,9 @@ u32 function_cc execute_arm_vram(u32 cycles)
   if ((s32)cycles <= 0) {
     result = update_gba(cycles);
     if (!completed_frame(result) && (reg[REG_PC] >> 24) == 0x06)
-      result = execute_arm_internal(cycles_to_run(result), true);
+      result = execute_arm_internal<false>(cycles_to_run(result), true);
   } else {
-    result = execute_arm_internal(cycles, true);
+    result = execute_arm_internal<false>(cycles, true);
   }
 #ifdef HAVE_DYNAREC
   /* Interpreted routines may write I/EWRAM without the JIT's SMC handlers.
@@ -3654,14 +3898,20 @@ void init_cpu(void)
 
 bool cpu_check_savestate(const u8 *src)
 {
-  const u8 *cpudoc = bson_find_key(src, "cpu");
-  if (!cpudoc)
+  if (!bson_contains_doc(src, "cpu"))
     return false;
+  const u8 *cpudoc = bson_find_key(src, "cpu");
 
-  return bson_contains_key(cpudoc, "bus-value", BSON_TYPE_INT32) &&
-         bson_contains_key(cpudoc, "regs", BSON_TYPE_ARR) &&
-         bson_contains_key(cpudoc, "spsr", BSON_TYPE_ARR) &&
-         bson_contains_key(cpudoc, "regmod", BSON_TYPE_ARR);
+  u32 regs[REG_ARCH_COUNT];
+  if (!(bson_contains_key(cpudoc, "bus-value", BSON_TYPE_INT32) &&
+        bson_contains_int32_array(cpudoc, "regs", REG_ARCH_COUNT) &&
+        bson_contains_int32_array(cpudoc, "spsr", 6) &&
+        bson_contains_int32_array(cpudoc, "regmod", 7*7) &&
+        bson_read_int32_array(cpudoc, "regs", regs, REG_ARCH_COUNT)))
+    return false;
+  /* The mode indexes reg_mode and spsr: user, or system to undefined. */
+  return regs[CPU_MODE] == MODE_USER ||
+         (regs[CPU_MODE] >= MODE_SYSTEM && regs[CPU_MODE] <= MODE_UNDEFINED);
 }
 
 

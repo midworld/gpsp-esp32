@@ -83,6 +83,8 @@ void rand_seed(u32 data);
 #define cycles_to_run(c) ((c) & 0x7FFF)
 #define completed_frame(c) ((c) & 0x80000000)
 u32 function_cc update_gba(int remaining_cycles);
+/* CPU budget for the start of a frame, less carried stall cycles. */
+u32 frame_start_cycles(void);
 void reset_gba(void);
 
 void init_main(void);

@@ -12,7 +12,21 @@
 #endif
 
 /* Cache sizes and their config knobs */
-#if defined(SMALL_TRANSLATION_CACHE)
+#define GPSP_RV32_BRANCH_CACHE_SIZE 1024
+#ifndef GPSP_RV32_CODE_CHUNK_KIB
+#define GPSP_RV32_CODE_CHUNK_KIB 256
+#endif
+#if defined(GPSP_RV32_JIT)
+  #ifndef GPSP_RV32_ROM_CACHE_KIB
+    #define GPSP_RV32_ROM_CACHE_KIB 2048
+  #endif
+  #ifndef GPSP_RV32_RAM_CACHE_KIB
+    #define GPSP_RV32_RAM_CACHE_KIB 2048
+  #endif
+  /* Each cache starts with one chunk and grows up to its limit. */
+  #define ROM_TRANSLATION_CACHE_SIZE (1024 * GPSP_RV32_ROM_CACHE_KIB)
+  #define RAM_TRANSLATION_CACHE_SIZE (1024 * GPSP_RV32_RAM_CACHE_KIB)
+#elif defined(SMALL_TRANSLATION_CACHE)
   #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2)
   #define RAM_TRANSLATION_CACHE_SIZE (1024 * 384)
 #else
@@ -25,7 +39,11 @@
 #define TRANSLATION_CACHE_LIMIT_THRESHOLD (1024 * 2)
 
 /* Hash table size for ROM trans cache lookups */
+#if defined(GPSP_RV32_JIT)
+#define ROM_BRANCH_HASH_BITS                           12
+#else
 #define ROM_BRANCH_HASH_BITS                           16
+#endif
 #define ROM_BRANCH_HASH_SIZE   (1 << ROM_BRANCH_HASH_BITS)
 
 /* RFU Multiplayer config, do not mess around too much with it */

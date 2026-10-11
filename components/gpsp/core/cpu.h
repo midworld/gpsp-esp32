@@ -110,10 +110,26 @@ typedef enum
 extern u32 instruction_count;
 
 void execute_arm(u32 cycles);
+#ifdef GPSP_RV32_JIT
+/* Execute exactly one ARM or Thumb guest instruction without advancing the
+ * video/timer scheduler. Return the signed remaining guest cycle budget.
+ * The caller must process scheduler events when that budget is exhausted. */
+s32 execute_arm_one(s32 cycles);
+/* Run non-JIT regions until a JIT address or scheduler boundary. */
+s32 execute_arm_until_jit(s32 cycles, u64 *steps);
+#endif
 /* Interpret mutable VRAM until execution leaves it or a frame completes.
  * Returns the same cycle-count/frame-complete encoding as update_gba(). */
 u32 function_cc execute_arm_vram(u32 cycles);
 u32 check_and_raise_interrupts(void);
+/* Cycles of taken IRQ entries not yet charged to a CPU budget. */
+extern u32 irq_entry_cycles;
+static inline u32 take_irq_entry_cycles(void)
+{
+  u32 cycles = irq_entry_cycles;
+  irq_entry_cycles = 0;
+  return cycles;
+}
 cpu_alert_type check_interrupt(void);
 cpu_alert_type flag_interrupt(irq_type irq_raised);
 void set_cpu_mode(cpu_mode_type new_mode);
@@ -143,6 +159,11 @@ bool translate_block_thumb(u32 pc, bool ram_region);
 #if defined(MMAP_JIT_CACHE)
 extern u8* rom_translation_cache;
 extern u8* ram_translation_cache;
+#elif defined(GPSP_RV32_JIT)
+#include "riscv/rv32_code_arena.h"
+bool rv32_ram_tags_alloc(void);
+void rv32_ram_tags_free(void);
+void rv32_tables_free(void);
 #elif defined(_3DS)
 #define rom_translation_cache ((u8*)0x02000000 - ROM_TRANSLATION_CACHE_SIZE)
 #define ram_translation_cache (rom_translation_cache - RAM_TRANSLATION_CACHE_SIZE)
@@ -169,6 +190,10 @@ extern u32 rom_branch_hash[ROM_BRANCH_HASH_SIZE];
 
 void flush_translation_cache_rom(void);
 void flush_translation_cache_ram(void);
+void invalidate_translation_cache_ram(void);
+#if defined(GPSP_RV32_JIT)
+void gpsp_rv32_request_wait_flush(void);
+#endif
 void dump_translation_cache(void);
 void init_dynarec_caches(void);
 void flush_dynarec_caches(void);

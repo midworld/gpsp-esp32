@@ -18,7 +18,46 @@
  */
 
 #include "common.h"
+#include "gpsp_memory.h"
 #include "streams/file_stream.h"
+#include "gpsp_frame_stats.h"
+#include "gba_rom_scan.h"
+#if defined(__riscv)
+#include <stdatomic.h>
+#endif
+#if defined(GPSP_BENCHMARK)
+#include "gpsp_benchmark_timing.h"
+#endif
+#if defined(GPSP_RV32_JIT)
+#include "riscv/rv32_ram_units.h"
+#include "riscv/rv32_thumb_memory.h"
+/* Queue code changes and raise SMC unless all live units absorb them. */
+#define write_ram(type, base, offset) {                                       \
+  u##type *dst = &address##type(base, offset);                                \
+  if (gpsp_rv32_store_hits_code(address, (type) / 8))                         \
+  {                                                                           \
+    u##type old = *dst;                                                       \
+    *dst = eswap##type(value);                                                \
+    u32 at = address & ~((type) / 8 - 1);                                     \
+    if (*dst != old && !code_write_absorbed(at, (type) / 8, old, *dst))       \
+    {                                                                         \
+      gpsp_rv32_ram_dirty_add(at, (type) / 8);                                \
+      gpsp_rv32_add_memory_alert(CPU_ALERT_SMC);                              \
+      return CPU_ALERT_SMC;                                                    \
+    }                                                                         \
+  }                                                                           \
+  else                                                                        \
+    *dst = eswap##type(value);                                                \
+}
+#define dma_code_changed(address, bytes)                                      \
+  gpsp_rv32_ram_dirty_add(address, bytes)
+#define code_write_absorbed gpsp_rv32_code_write_absorbed
+#else
+#define write_ram(type, base, offset)                                         \
+  address##type(base, offset) = eswap##type(value)
+#define dma_code_changed(address, bytes) ((void)0)
+#define code_write_absorbed(address, bytes, before, after) false
+#endif
 
 /* Sound */
 #define gbc_sound_tone_control_low(channel, regn)                             \
@@ -120,6 +159,11 @@ static const u32 gbc_sound_wave_volume[4] = { 0, 16384, 8192, 4096 };
   gbc_sound_channel[3].frequency_step =                                       \
    psg_noise_step(dividing_ratio, frequency_shift);                           \
   gbc_sound_channel[3].noise_type = (value >> 3) & 0x01;                      \
+  /* A switch to 7-bit noise keeps the position; the 7-bit table is far    \
+     shorter, so wrap it into its period. */                                \
+  if(gbc_sound_channel[3].noise_type)                                         \
+    gbc_sound_channel[3].sample_index %=                                      \
+     u32_to_fp16_16(gbc_noise_wrap_half);                                     \
   gbc_sound_channel[3].length_status = (value >> 14) & 0x01;                  \
   if(value & 0x8000)                                                          \
   {                                                                           \
@@ -209,6 +253,7 @@ void sound_frequency_changed(void)
    u32 i;
    u16 snd4 = read_ioreg(REG_SOUND4CNT_H);
 
+   sound_update_tick_step();
    gbc_sound_channel[0].frequency_step = psg_tone_step(gbc_sound_channel[0].rate);
    gbc_sound_channel[1].frequency_step = psg_tone_step(gbc_sound_channel[1].rate);
    gbc_sound_channel[2].frequency_step = psg_wave_step(gbc_sound_channel[2].rate);
@@ -377,26 +422,63 @@ bool gamepak_header_nonstandard;
 // We allocate in 1MB chunks.
 const unsigned gamepak_buffer_blocksize = 1024*1024;
 
-// LRU queue with the loaded blocks and what they map to
-struct {
-  u16 next_lru;             /* Index in the struct to the next LRU entry */
-  s16 phy_rom;              /* ROM page number (-1 means not mapped) */
-} gamepak_blk_queue[1024];
-
-u16 gamepak_lru_head;
-u16 gamepak_lru_tail;
+// Clock replacement over the 32KB slots of the loaded blocks. The hand
+// unmaps a resident page it passes but keeps its data; the next access
+// maps it again without a file read, which marks the page as used.
+s16 gamepak_slot_page[1024];  /* ROM page in each slot, or -1 */
+s16 gamepak_page_slot[1024];  /* Slot holding each ROM page, or -1 */
+u16 gamepak_clock_hand;
 
 // Stick page bit: prevents page eviction for a frame. This is used to prevent
 // unmapping code pages while being used (ie. in the interpreter).
 u32 gamepak_sticky_bit[1024/32];
 
 #define gamepak_sb_test(idx) \
- (gamepak_sticky_bit[((unsigned)(idx)) >> 5] & (1 << (((unsigned)(idx)) & 31)))
+ (gamepak_sticky_bit[((unsigned)(idx)) >> 5] & (1u << (((unsigned)(idx)) & 31)))
 
 // This is global so that it can be kept open for large ROMs to swap
 // pages from, so there's no slowdown with opening and closing the file
 // a lot.
 RFILE *gamepak_file_large = NULL;
+
+#if defined(__riscv)
+/* Frontend stats: ROM page loads from the file, loads of pages that were
+   resident before, remaps of pages still in a slot, and the CPU cycles
+   spent loading. */
+static _Atomic(u32) rom_page_loads;
+static _Atomic(u32) rom_page_reloads;
+static _Atomic(u32) rom_page_remaps;
+static _Atomic(u32) rom_page_cycles;
+static u32 rom_page_seen[1024 / 32];
+
+static inline u32 rom_page_cycle_count(void)
+{
+  u32 cycles;
+  __asm__ volatile("rdcycle %0" : "=r"(cycles));
+  return cycles;
+}
+
+static inline void rom_page_mark_seen(u32 idx)
+{
+  rom_page_seen[idx >> 5] |= 1U << (idx & 31);
+}
+#endif
+
+void gpsp_rom_page_stats(uint32_t *loads, uint32_t *reloads,
+                         uint32_t *remaps, uint32_t *cycles)
+{
+#if defined(__riscv)
+  *loads = atomic_load_explicit(&rom_page_loads, memory_order_relaxed);
+  *reloads = atomic_load_explicit(&rom_page_reloads, memory_order_relaxed);
+  *remaps = atomic_load_explicit(&rom_page_remaps, memory_order_relaxed);
+  *cycles = atomic_load_explicit(&rom_page_cycles, memory_order_relaxed);
+#else
+  *loads = 0;
+  *reloads = 0;
+  *remaps = 0;
+  *cycles = 0;
+#endif
+}
 
 // Writes to these respective locations should trigger an update
 // so the related subsystem may react to it.
@@ -445,6 +527,23 @@ void reload_timing_info()
   {
     /* 32 bit accesses are a non-seq (16) + seq access (16) */
     ws_cyc_nseq[i][1] = 1 + ws_cyc_nseq[i][0] + ws_cyc_seq[i][0];
+  }
+}
+
+size_t gpsp_backup_size(void)
+{
+  u32 type = backup_type == BACKUP_UNKN ? backup_type_reset : backup_type;
+
+  switch(type)
+  {
+    case BACKUP_SRAM:
+      return 32 * 1024;
+    case BACKUP_FLASH:
+      return flash_bank_cnt == FLASH_SIZE_128KB ? 128 * 1024 : 64 * 1024;
+    case BACKUP_EEPROM:
+      return eeprom_size == EEPROM_8_KBYTE ? 8 * 1024 : 512;
+    default:
+      return 0;
   }
 }
 
@@ -800,6 +899,34 @@ u32 function_cc read_io_register16(u32 address)
       return value;
   }
 }
+
+#if defined(GPSP_RV32_JIT)
+/* Read masks for RV32 native I/O loads, per halfword and per word. Zero
+   keeps open-bus and always-zero registers on the C path. */
+u32 gpsp_rv32_io_read_mask16[512];
+u32 gpsp_rv32_io_read_mask32[256];
+
+static void rv32_io_read_mask_init(void)
+{
+  for (u32 index = 0; index < 512; index++)
+  {
+    u32 saved = read_ioreg(index);
+    gpsp_rv32_io_read_mask16[index] = 0;
+    if (io_read_open_bus16(index * 2))
+      continue;
+    write_ioreg(index, 0xFFFF);
+    gpsp_rv32_io_read_mask16[index] =
+        read_io_register16(0x04000000 | (index * 2));
+    write_ioreg(index, saved);
+  }
+  for (u32 index = 0; index < 256; index++)
+  {
+    u32 low = gpsp_rv32_io_read_mask16[index * 2];
+    u32 high = gpsp_rv32_io_read_mask16[index * 2 + 1];
+    gpsp_rv32_io_read_mask32[index] = low && high ? low | (high << 16) : 0;
+  }
+}
+#endif
 
 u32 function_cc read_io_register8(u32 address)
 {
@@ -1216,9 +1343,24 @@ cpu_alert_type function_cc write_io_register16(u32 address, u32 value)
       break;
 
     case REG_WAITCNT:
+    {
+#if defined(GPSP_RV32_JIT)
+      /* reload_timing_info() reads only the ROM wait fields. */
+      bool changed = (value ^ read_ioreg(REG_WAITCNT)) & 0x07FC;
+#endif
       write_ioreg(REG_WAITCNT, value);
       reload_timing_info();
+#if defined(GPSP_RV32_JIT)
+      /* Retranslate code that holds the old waits: the SMC alert exits the
+         block and the dispatcher flushes both code caches. */
+      if (changed)
+      {
+        gpsp_rv32_request_wait_flush();
+        return CPU_ALERT_SMC;
+      }
+#endif
       break;
+    }
 
     // Registers without side effects
     default:
@@ -1229,6 +1371,74 @@ cpu_alert_type function_cc write_io_register16(u32 address, u32 value)
 
   return CPU_ALERT_NONE;
 }
+
+#if defined(GPSP_RV32_JIT)
+/* Store masks for RV32 native I/O stores: registers whose case above only
+   stores masked data. Zero keeps side effects on the C path. Keep this in
+   sync with write_io_register16. */
+u32 gpsp_rv32_io_write_mask16[512];
+u32 gpsp_rv32_io_write_mask32[256];
+
+static u32 rv32_io_write_mask(u32 ioreg)
+{
+  switch (ioreg)
+  {
+    case REG_BG0CNT:
+    case REG_BG1CNT:
+      return 0xDFFF;
+    case REG_WININ:
+    case REG_WINOUT:
+      return 0x3F3F;
+    case REG_BLDCNT:
+      return 0x3FFF;
+    case REG_BLDALPHA:
+      return 0x1F1F;
+    case REG_BLDY:
+      return 0x001F;
+
+    case REG_DISPCNT:
+    case REG_DISPSTAT:
+    case REG_VCOUNT:
+    case REG_BG2X_L ... REG_BG2Y_H:
+    case REG_BG3X_L ... REG_BG3Y_H:
+    case 0x30 ... 0x57:              /* sound, wave RAM and FIFOs */
+    case REG_DMA0CNT_H:
+    case REG_DMA1CNT_H:
+    case REG_DMA2CNT_H:
+    case REG_DMA3CNT_H:
+    case REG_TM0D ... REG_TM3CNT:
+    case REG_SIOCNT:
+    case REG_P1:
+    case REG_RCNT:
+    case REG_IE:
+    case REG_IF:
+    case REG_WAITCNT:
+    case REG_IME:
+    case 0x09B:
+    case 0x0A1:
+    case 0x0AD:
+    case 0x103:
+    case 0x105:
+    case 0x181:
+      return 0;
+
+    default:
+      return ioreg < 0x200 ? 0xFFFF : 0;
+  }
+}
+
+static void rv32_io_write_mask_init(void)
+{
+  for (u32 index = 0; index < 512; index++)
+    gpsp_rv32_io_write_mask16[index] = rv32_io_write_mask(index);
+  for (u32 index = 0; index < 256; index++)
+  {
+    u32 low = gpsp_rv32_io_write_mask16[index * 2];
+    u32 high = gpsp_rv32_io_write_mask16[index * 2 + 1];
+    gpsp_rv32_io_write_mask32[index] = low && high ? low | (high << 16) : 0;
+  }
+}
+#endif
 
 cpu_alert_type function_cc write_io_register8(u32 address, u32 value)
 {
@@ -1279,6 +1489,7 @@ cpu_alert_type function_cc write_io_register32(u32 address, u32 value)
   u16 val16 = (value << 8) | value;                                           \
   address16(palette_ram, aladdr) = eswap16(val16);                            \
   address16(palette_ram_converted, aladdr) = convert_palette(val16);          \
+  write_palette_expanded(aladdr, convert_palette(val16));                     \
 }
 
 #define write_palette16(address, value)                                       \
@@ -1287,6 +1498,7 @@ cpu_alert_type function_cc write_io_register32(u32 address, u32 value)
   address16(palette_ram, palette_address) = eswap16(value);                   \
   value = convert_palette(value);                                             \
   address16(palette_ram_converted, palette_address) = value;                  \
+  write_palette_expanded(palette_address, value);                             \
 }                                                                             \
 
 #define write_palette32(address, value)                                       \
@@ -1297,8 +1509,10 @@ cpu_alert_type function_cc write_io_register32(u32 address, u32 value)
   address32(palette_ram, palette_address) = eswap32(value);                   \
   value_high = convert_palette(value_high);                                   \
   address16(palette_ram_converted, palette_address + 2) = value_high;         \
+  write_palette_expanded(palette_address + 2, value_high);                    \
   value_low = convert_palette(value_low);                                     \
   address16(palette_ram_converted, palette_address) = value_low;              \
+  write_palette_expanded(palette_address, value_low);                         \
 }                                                                             \
 
 
@@ -1732,12 +1946,12 @@ void function_cc write_gpio(u32 address, u32 value) {
   {                                                                           \
     case 0x02:                                                                \
       /* external work RAM */                                                 \
-      address##type(ewram, (address & 0x3FFFF)) = eswap##type(value);         \
+      write_ram(type, ewram, (address & 0x3FFFF));                            \
       break;                                                                  \
                                                                               \
     case 0x03:                                                                \
       /* internal work RAM */                                                 \
-      address##type(iwram, (address & 0x7FFF) + 0x8000) = eswap##type(value); \
+      write_ram(type, iwram, (address & 0x7FFF) + 0x8000);                    \
       break;                                                                  \
                                                                               \
     case 0x04:                                                                \
@@ -2071,11 +2285,25 @@ const dma_region_type dma_region_map[17] =
 #define dma_read_ext(type, tfsize)                                            \
   read_value = read_memory##tfsize(type##_ptr)                                \
 
-#define dma_write_iwram(type, tfsize)                                         \
-  address##tfsize(iwram + 0x8000, type##_ptr & 0x7FFF) =                      \
-                                          eswap##tfsize(read_value);          \
-  if (address##tfsize(iwram, type##_ptr & 0x7FFF))                            \
+/* As in write_ram, only a write that changes code bytes raises SMC. */
+#define dma_write_code(dst, address, tfsize) {                                \
+  u##tfsize old = *(dst);                                                     \
+  *(dst) = eswap##tfsize(read_value);                                         \
+  if (*(dst) != old &&                                                        \
+      !code_write_absorbed(address, (tfsize) / 8, old, *(dst)))               \
+  {                                                                           \
+    dma_code_changed(address, (tfsize) / 8);                                  \
     alerts |= CPU_ALERT_SMC;                                                  \
+  }                                                                           \
+}
+
+#define dma_write_iwram(type, tfsize) {                                       \
+  u##tfsize *dst = &address##tfsize(iwram + 0x8000, type##_ptr & 0x7FFF);     \
+  if (address##tfsize(iwram, type##_ptr & 0x7FFF))                            \
+    dma_write_code(dst, 0x03000000 | (type##_ptr & 0x7FFF), tfsize)           \
+  else                                                                        \
+    *dst = eswap##tfsize(read_value);                                         \
+}
 
 #define dma_write_vram(type, tfsize) {                                        \
   u32 wraddr = type##_ptr & 0x1FFFF;                                          \
@@ -2095,10 +2323,13 @@ const dma_region_type dma_region_map[17] =
 #define dma_write_ext(type, tfsize)                                           \
   write_memory##tfsize(type##_ptr, read_value)                                \
 
-#define dma_write_ewram(type, tfsize)                                         \
-  address##tfsize(ewram, type##_ptr & 0x3FFFF) = eswap##tfsize(read_value);   \
+#define dma_write_ewram(type, tfsize) {                                       \
+  u##tfsize *dst = &address##tfsize(ewram, type##_ptr & 0x3FFFF);             \
   if (address##tfsize(ewram, (type##_ptr & 0x3FFFF) + 0x40000))               \
-    alerts |= CPU_ALERT_SMC;                                                  \
+    dma_write_code(dst, 0x02000000 | (type##_ptr & 0x3FFFF), tfsize)          \
+  else                                                                        \
+    *dst = eswap##tfsize(read_value);                                         \
+}
 
 #define print_line()                                                          \
   dma_print(src_op, dest_op, tfsize);                                         \
@@ -2371,6 +2602,12 @@ cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)
   cpu_alert_type ret = CPU_ALERT_NONE;
   u32 tfsizes = dmach->length_type == DMA_16BIT ? 1 : 2;
   u32 byte_length = dmach->length << tfsizes;
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_enter(GPSP_BENCHMARK_DMA);
+#if defined(GPSP_BENCHMARK_PHASE_WORK)
+  gpsp_benchmark_timing_dma_bytes(byte_length);
+#endif
+#endif
 
   // Divide the DMA transaction into up to three transactions depending on
   // the source and destination memory regions.
@@ -2423,6 +2660,13 @@ cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)
        def_seq_cycles[src_ptr >> 24][tfsizes - 1] +
        def_seq_cycles[dst_ptr >> 24][tfsizes - 1]);
 
+#if defined(GPSP_RV32_JIT)
+  if (ret & CPU_ALERT_SMC)
+    gpsp_rv32_add_memory_alert(CPU_ALERT_SMC);
+#endif
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_leave();
+#endif
   return ret;
 }
 
@@ -2465,32 +2709,42 @@ cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)
   }                                                                           \
 
 
+static void reset_gamepak_slots(void)
+{
+  memset(gamepak_slot_page, 0xFF, sizeof(gamepak_slot_page));
+  memset(gamepak_page_slot, 0xFF, sizeof(gamepak_page_slot));
+  gamepak_clock_hand = 0;
+}
+
+static u8 *gamepak_slot_ptr(u32 slot)
+{
+  return &gamepak_buffers[slot / 32][32 * 1024 * (slot % 32)];
+}
+
 static u32 evict_gamepak_page(void)
 {
-  u32 ret;
-  s16 phyrom;
-  do {
-    // Return the index to the last used entry
-    u32 newhead = gamepak_blk_queue[gamepak_lru_head].next_lru;
-    phyrom = gamepak_blk_queue[gamepak_lru_head].phy_rom;
-    ret = gamepak_lru_head;
+  u32 slots = 32 * gamepak_buffer_count;
+  while (1)
+  {
+    u32 slot = gamepak_clock_hand;
+    s16 phyrom = gamepak_slot_page[slot];
+    gamepak_clock_hand = (u16)((slot + 1) % slots);
 
-    // Second elem becomes head now
-    gamepak_lru_head = newhead;
+    if (phyrom < 0)
+      return slot;
+    // Sticky pages are in use by the interpreter
+    if (gamepak_sb_test(phyrom))
+      continue;
+    // Mapped means used since the hand last passed: unmap and keep it
+    if (memory_map_read[(0x8000000 >> 15) + phyrom]) {
+      map_rom_entry(read, phyrom, NULL, gamepak_size >> 15);
+      continue;
+    }
 
-    // The evicted element goes at the end of the queue
-    gamepak_blk_queue[gamepak_lru_tail].next_lru = ret;
-    gamepak_lru_tail = ret;
-    // If this page is marked as sticky, we keep going through the list
-  } while (phyrom >= 0 && gamepak_sb_test(phyrom));
-
-  // We unmap the ROM page if it was mapped, ensure we do not access it
-  // without triggering a "page fault"
-  if (phyrom >= 0) {
-    map_rom_entry(read, phyrom, NULL, gamepak_size >> 15);
+    gamepak_page_slot[phyrom] = -1;
+    gamepak_slot_page[slot] = -1;
+    return slot;
   }
-
-  return ret;
 }
 
 u8 *load_gamepak_page(u32 physical_index)
@@ -2504,13 +2758,34 @@ u8 *load_gamepak_page(u32 physical_index)
   if (physical_index >= rom_blocks)
     physical_index %= rom_blocks;
 
+  s16 resident = gamepak_page_slot[physical_index];
+  if (resident >= 0)
+  {
+    u8 *location = gamepak_slot_ptr(resident);
+#if defined(__riscv)
+    atomic_fetch_add_explicit(&rom_page_remaps, 1, memory_order_relaxed);
+#endif
+    map_rom_entry(read, physical_index, location, rom_blocks);
+    // GPIO registers are not updated while page 0 is unmapped
+    if (physical_index == 0)
+      update_gpio_romregs();
+    return location;
+  }
+
+#if defined(__riscv)
+  u32 load_start = rom_page_cycle_count();
+  atomic_fetch_add_explicit(&rom_page_loads, 1, memory_order_relaxed);
+  if (rom_page_seen[physical_index >> 5] & (1U << (physical_index & 31)))
+    atomic_fetch_add_explicit(&rom_page_reloads, 1, memory_order_relaxed);
+  rom_page_mark_seen(physical_index);
+#endif
+
   u32 entry = evict_gamepak_page();
-  u32 block_idx = entry / 32;
-  u32 block_off = entry % 32;
-  u8 *swap_location = &gamepak_buffers[block_idx][32 * 1024 * block_off];
+  u8 *swap_location = gamepak_slot_ptr(entry);
 
   // Fill in the entry
-  gamepak_blk_queue[entry].phy_rom = physical_index;
+  gamepak_slot_page[entry] = physical_index;
+  gamepak_page_slot[physical_index] = entry;
 
   u32 file_index = physical_index;
   if (gamepak_mirror_1m && gamepak_file_blocks != 0)
@@ -2530,15 +2805,28 @@ u8 *load_gamepak_page(u32 physical_index)
   if (physical_index == 0)
     update_gpio_romregs();
 
+#if defined(__riscv)
+  atomic_fetch_add_explicit(&rom_page_cycles,
+      rom_page_cycle_count() - load_start, memory_order_relaxed);
+#endif
   return swap_location;
+}
+
+static unsigned gamepak_buffer_limit = ROM_BUFFER_SIZE;
+
+bool gpsp_set_rom_buffer_limit(unsigned mib)
+{
+  if (!mib || mib > ROM_BUFFER_SIZE || mib > 32 || gamepak_buffer_count)
+    return false;
+  gamepak_buffer_limit = mib;
+  return true;
 }
 
 void init_gamepak_buffer(void)
 {
-  unsigned i;
-  // Try to allocate up to 32 blocks of 1MB each
+  // Allocate 1 MiB blocks up to the frontend's limit.
   gamepak_buffer_count = 0;
-  while (gamepak_buffer_count < ROM_BUFFER_SIZE)
+  while (gamepak_buffer_count < gamepak_buffer_limit)
   {
     void *ptr = malloc(gamepak_buffer_blocksize);
     if (!ptr)
@@ -2547,14 +2835,30 @@ void init_gamepak_buffer(void)
   }
 
   // Initialize the memory map structure
-  for (i = 0; i < 1024; i++)
-  {
-    gamepak_blk_queue[i].next_lru = (u16)(i + 1);
-    gamepak_blk_queue[i].phy_rom = -1;
-  }
+  reset_gamepak_slots();
+}
 
-  gamepak_lru_head = 0;
-  gamepak_lru_tail = 32 * gamepak_buffer_count - 1;
+// Keeps only the 1MB blocks a ROM of rom_bytes needs (at least one, at most
+// gamepak_buffer_limit), so small games leave the rest of the memory free.
+static void fit_gamepak_buffer(u32 rom_bytes)
+{
+  u32 need = (rom_bytes + gamepak_buffer_blocksize - 1) /
+             gamepak_buffer_blocksize;
+  if (need < 1)
+    need = 1;
+  if (need > gamepak_buffer_limit)
+    need = gamepak_buffer_limit;
+
+  while (gamepak_buffer_count > need)
+    free(gamepak_buffers[--gamepak_buffer_count]);
+  while (gamepak_buffer_count < need)
+  {
+    void *ptr = malloc(gamepak_buffer_blocksize);
+    if (!ptr)
+      break;
+    gamepak_buffers[gamepak_buffer_count++] = (u8*)ptr;
+  }
+  reset_gamepak_slots();
 }
 
 bool gamepak_must_swap(void)
@@ -2598,6 +2902,12 @@ void init_memory(void)
   memset(io_registers, 0, sizeof(io_registers));
   memset(oam_ram, 0, sizeof(oam_ram));
   memset(palette_ram, 0, sizeof(palette_ram));
+  // The renderer reads the converted colors: clear them with the palette
+  for (i = 0; i < 512; i++)
+  {
+    palette_ram_converted[i] = convert_palette(0);
+    write_palette_expanded(i * 2, palette_ram_converted[i]);
+  }
   memset(iwram, 0, sizeof(iwram));
   memset(ewram, 0, sizeof(ewram));
   memset(vram, 0, sizeof(vram));
@@ -2628,6 +2938,10 @@ void init_memory(void)
   rtc_state = RTC_DISABLED;
   memset(gpio_regs, 0, sizeof(gpio_regs));
   reg[REG_BUS_VALUE] = 0xe129f000;
+#if defined(GPSP_RV32_JIT)
+  rv32_io_read_mask_init();
+  rv32_io_write_mask_init();
+#endif
 }
 
 void memory_term(void)
@@ -2663,19 +2977,20 @@ bool memory_check_savestate(const u8 *src)
     "len", "size", "repeat", "start", "dsc", "irq"
   };
   int i;
+  if (!bson_contains_doc(src, "memory") || !bson_contains_doc(src, "backup") ||
+      !bson_contains_doc(src, "dma"))
+    return false;
   const u8 *memdoc = bson_find_key(src, "memory");
   const u8 *bakdoc = bson_find_key(src, "backup");
   const u8 *dmadoc = bson_find_key(src, "dma");
-  if (!memdoc || !bakdoc || !dmadoc)
-    return false;
 
-  // Check memory buffers (TODO: check sizes!)
-  if (!bson_contains_key(memdoc, "iwram", BSON_TYPE_BIN) ||
-      !bson_contains_key(memdoc, "ewram", BSON_TYPE_BIN) ||
-      !bson_contains_key(memdoc, "vram", BSON_TYPE_BIN) ||
-      !bson_contains_key(memdoc, "oamram", BSON_TYPE_BIN) ||
-      !bson_contains_key(memdoc, "palram", BSON_TYPE_BIN) ||
-      !bson_contains_key(memdoc, "ioregs", BSON_TYPE_BIN) ||
+  // Check memory buffers, with the sizes memory_read_savestate expects
+  if (!bson_contains_bytes(memdoc, "iwram", 0x8000) ||
+      !bson_contains_bytes(memdoc, "ewram", 0x40000) ||
+      !bson_contains_bytes(memdoc, "vram", sizeof(vram)) ||
+      !bson_contains_bytes(memdoc, "oamram", sizeof(oam_ram)) ||
+      !bson_contains_bytes(memdoc, "palram", sizeof(palette_ram)) ||
+      !bson_contains_bytes(memdoc, "ioregs", sizeof(io_registers)) ||
       !bson_contains_key(memdoc, "dma-bus", BSON_TYPE_INT32))
      return false;
 
@@ -2684,20 +2999,72 @@ bool memory_check_savestate(const u8 *src)
     if (!bson_contains_key(bakdoc, vars32[i], BSON_TYPE_INT32))
       return false;
 
-  if (!bson_contains_key(bakdoc, "gpio-regs", BSON_TYPE_BIN) ||
-      !bson_contains_key(bakdoc, "rtc-data-words", BSON_TYPE_ARR))
+  if (!bson_contains_bytes(bakdoc, "gpio-regs", sizeof(gpio_regs)) ||
+      !bson_contains_int32_array(bakdoc, "rtc-data-words", 2))
       return false;
+  /* Optional, but read as an array when present. */
+  if (bson_find_key(bakdoc, "rtc-base-time") &&
+      !bson_contains_int32_array(bakdoc, "rtc-base-time", 2))
+    return false;
+
+  /* Values that index gamepak_backup (128 KiB), checked before any state
+     is replaced. EEPROM reads and writes 8 bytes at a block address. While
+     the address bits arrive it holds up to 16 raw bits, which later shift
+     to a block address below 128 KiB. Every later step keeps the block
+     address: the read footer and header pass it on to the read. */
+  {
+    u32 bank, mode, addr, count;
+    bson_read_int32(bakdoc, "flash-bank-num", &bank);
+    bson_read_int32(bakdoc, "eeprom-mode", &mode);
+    bson_read_int32(bakdoc, "eeprom-addr", &addr);
+    bson_read_int32(bakdoc, "eeprom-counter", &count);
+    if (bank > 1)
+      return false;
+    switch (mode)
+    {
+      case EEPROM_BASE_MODE:
+        /* The address still holds the last block (or command bits); it is
+           cleared after two bits and not used as an index here. */
+        if (count >= 2)
+          return false;
+        break;
+      case EEPROM_ADDRESS_MODE:
+      case EEPROM_WRITE_ADDRESS_MODE:
+        if (addr > 0xFFFF || count >= 16)
+          return false;
+        break;
+      case EEPROM_ADDRESS_FOOTER_MODE:
+      case EEPROM_READ_HEADER_MODE:
+      case EEPROM_READ_MODE:
+      case EEPROM_WRITE_MODE:
+      case EEPROM_WRITE_FOOTER_MODE:
+        if (addr > sizeof(gamepak_backup) - 8 ||
+            count >= (mode == EEPROM_READ_HEADER_MODE ? 4 : 64))
+          return false;
+        break;
+      default:
+        return false;
+    }
+  }
 
   for (i = 0; i < DMA_CHAN_CNT; i++)
   {
     char tname[2] = {'0' + i, 0};
-    const u8 *dmastr = bson_find_key(dmadoc, tname);
-    if (!dmastr)
+    if (!bson_contains_doc(dmadoc, tname))
       return false;
+    const u8 *dmastr = bson_find_key(dmadoc, tname);
 
-    for (i = 0; i < sizeof(dmavars32)/sizeof(dmavars32[0]); i++)
-      if (!bson_contains_key(dmastr, dmavars32[i], BSON_TYPE_INT32))
+    /* Own index: reusing i ended the channel loop after DMA 0. */
+    for (int j = 0; j < sizeof(dmavars32)/sizeof(dmavars32[0]); j++)
+      if (!bson_contains_key(dmastr, dmavars32[j], BSON_TYPE_INT32))
         return false;
+
+    /* The directions index dma_stride. */
+    u32 src_dir, dst_dir;
+    bson_read_int32(dmastr, "src-dir", &src_dir);
+    bson_read_int32(dmastr, "dst-dir", &dst_dir);
+    if (src_dir >= 4 || dst_dir >= 4)
+      return false;
   }
   return true;
 }
@@ -2889,6 +3256,8 @@ static s32 load_gamepak_raw(const char *name)
       gamepak_mini_rom = (u8*)malloc(gamepak_size);
       if (gamepak_mini_rom)
       {
+        // The mini ROM has its own image; only block 0 holds the header
+        fit_gamepak_buffer(1);
         u32 read_len = (u32)filestream_read(gamepak_file_large, gamepak_mini_rom, raw_size);
         if (read_len < raw_size)
           memset(gamepak_mini_rom + read_len, 0xFF, raw_size - read_len);
@@ -2928,6 +3297,7 @@ static s32 load_gamepak_raw(const char *name)
     }
 
     // Load stuff in 1MB chunks
+    fit_gamepak_buffer(raw_size);
     u32 buf_blocks = (raw_size + gamepak_buffer_blocksize-1) / (gamepak_buffer_blocksize);
     u32 rom_blocks = gamepak_size >> 15;
     u32 ldblks = buf_blocks < gamepak_buffer_count ?
@@ -2946,6 +3316,10 @@ static s32 load_gamepak_raw(const char *name)
 
     // Unmap the ROM space since we will re-map it now
     map_null(read, 0x8000000, 0xD000000);
+    reset_gamepak_slots();
+#if defined(__riscv)
+    memset(rom_page_seen, 0, sizeof(rom_page_seen));
+#endif
 
     // Proceed to read the whole ROM or as much as possible.
     for (i = 0; i < ldblks; i++)
@@ -2960,8 +3334,11 @@ static s32 load_gamepak_raw(const char *name)
       {
         u32 phyn = i*32 + j;
         u8* blkptr = &gamepak_buffers[i][32 * 1024 * j];
-        u32 entry = evict_gamepak_page();
-        gamepak_blk_queue[entry].phy_rom = phyn;
+        gamepak_slot_page[i*32 + j] = phyn;
+        gamepak_page_slot[phyn] = i*32 + j;
+#if defined(__riscv)
+        rom_page_mark_seen(phyn);
+#endif
         // Map it to the read handlers now
         map_rom_entry(read, phyn, blkptr, rom_blocks);
       }
@@ -2987,54 +3364,6 @@ static bool rom_has_signature(const u8 *rom, u32 rom_size, const char *sig)
   }
 
   return false;
-}
-
-enum
-{
-  ROM_SIG_EEPROM  = (1 << 0),
-  ROM_SIG_SRAM    = (1 << 1),
-  ROM_SIG_FLASH1M = (1 << 2),
-  ROM_SIG_FLASH5  = (1 << 3)
-};
-
-static u32 rom_scan_signatures_in_memory(void)
-{
-  u32 found = 0;
-  u32 size_left = gamepak_size;
-  u32 buf_idx = 0;
-
-  const char *sig_eeprom = "EEPROM_V";
-  const char *sig_sram = "SRAM_V";
-  const char *sig_flash1m = "FLASH1M_V";
-  const char *sig_flash512 = "FLASH512_V";
-  const char *sig_flash = "FLASH_V";
-
-  while (size_left > 0 && buf_idx < gamepak_buffer_count)
-  {
-    u32 chunk_size = (size_left > gamepak_buffer_blocksize) ? gamepak_buffer_blocksize : size_left;
-    u8 *chunk = gamepak_buffers[buf_idx];
-    u32 i;
-
-    for (i = 0; i < chunk_size - 10; i += 4)
-    {
-      if (chunk[i] == 'E' && !(found & ROM_SIG_EEPROM) && memcmp(&chunk[i], sig_eeprom, 8) == 0) found |= ROM_SIG_EEPROM;
-      else if (chunk[i] == 'S' && !(found & ROM_SIG_SRAM) && memcmp(&chunk[i], sig_sram, 6) == 0) found |= ROM_SIG_SRAM;
-      else if (chunk[i] == 'F' && !(found & ROM_SIG_FLASH1M) && memcmp(&chunk[i], sig_flash1m, 9) == 0) found |= ROM_SIG_FLASH1M;
-      else if (chunk[i] == 'F' && !(found & ROM_SIG_FLASH5)) {
-        if (memcmp(&chunk[i], sig_flash512, 10) == 0 || memcmp(&chunk[i], sig_flash, 7) == 0)
-          found |= ROM_SIG_FLASH5;
-      }
-    }
-
-    if ((found & (ROM_SIG_EEPROM | ROM_SIG_SRAM | ROM_SIG_FLASH1M | ROM_SIG_FLASH5)) ==
-        (ROM_SIG_EEPROM | ROM_SIG_SRAM | ROM_SIG_FLASH1M | ROM_SIG_FLASH5))
-      break;
-
-    size_left -= chunk_size;
-    buf_idx++;
-  }
-
-  return found;
 }
 
 static bool rom_is_pokemon_family(const u8 *rom)
@@ -3102,7 +3431,23 @@ static void detect_backup_subcircuit(const u8 *rom, u32 rom_size)
   }
 
   if (!has_eeprom && !has_sram && !has_flash1m && !has_flash5)
-    file_sigs = rom_scan_signatures_in_memory();
+  {
+    struct rom_scan_result scan = rom_scan_signatures(gamepak_file_large,
+        gamepak_buffers, gamepak_buffer_count, gamepak_buffer_blocksize);
+    file_sigs = scan.signatures;
+    if (scan.status != ROM_SCAN_OK)
+    {
+      const char *reason = "file size";
+      if (scan.status == ROM_SCAN_NO_MEMORY)
+        reason = "allocation";
+      else if (scan.status == ROM_SCAN_SEEK_ERROR)
+        reason = "seek";
+      else if (scan.status == ROM_SCAN_READ_ERROR)
+        reason = "read";
+      fprintf(stderr, "gpSP warning: ROM signature scan incomplete (%s); "
+          "using partial signatures and runtime backup detection.\n", reason);
+    }
+  }
 
   if (has_eeprom ||
       (file_sigs & ROM_SIG_EEPROM))
@@ -3142,6 +3487,12 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
                  int force_rtc, int force_rumble, int force_serial)
 {
    char game_code[5] = {0,0,0,0,0};
+
+   /* Loading a 1MB ROM writes the GPIO registers into its image: drop the
+    * previous cartridge's ones first. */
+   rtc_enabled = false;
+   rumble_enabled = false;
+   memset(gpio_regs, 0, sizeof(gpio_regs));
 
    if (load_gamepak_raw(name))
       return -1;
