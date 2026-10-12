@@ -5,6 +5,8 @@
 - P4 Nano: LCD, speaker, USB gamepads, SD card games and save states,
   and Wi-Fi file transfer.
 
+![In-game menu and game list](docs/images/menu.png)
+
 ## Build
 
 - Requires ESP-IDF v6.1.
