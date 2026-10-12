@@ -32,12 +32,36 @@
 #include "gpsp_status.h"
 #endif
 #include "gpsp_rv32_esp_platform.h"
-#if CONFIG_GPSP_MENU
+#if CONFIG_GPSP_MENU && !CONFIG_ESPEMU
 #include "p4_nano_network.h"
+#endif
+#if CONFIG_GPSP_MENU && CONFIG_ESPEMU
+#include "esp_heap_caps.h"
+#include "espemu_protocol.h"
 #endif
 
 #if CONFIG_GPSP_AUDIO
 static bool s_audio_ready;
+#endif
+#if CONFIG_GPSP_MENU && CONFIG_ESPEMU
+/* The menu screen goes to the host; the core keeps the last frame while
+   the menu runs. */
+static uint16_t *s_ui_pixels;
+static const uint16_t *s_last_frame;
+static bool s_ui_shown;
+/* Connection that has the current picture; zero for none. */
+static uint32_t s_ui_session;
+
+/* The menu draws only on changes: a new or failed connection gets the
+   picture again from the input poll. */
+static void gpsp_espemu_ui_send(void)
+{
+    uint32_t session = gpsp_espemu_transport_session();
+
+    s_ui_session = session && gpsp_espemu_transport_submit_frame(s_ui_pixels,
+            GPSP_ESPEMU_UI_WIDTH, GPSP_ESPEMU_UI_HEIGHT,
+            GPSP_ESPEMU_UI_WIDTH * 2) ? session : 0;
+}
 #endif
 
 esp_err_t gpsp_board_init(void)
@@ -109,6 +133,11 @@ bool gpsp_board_video_present(
 #if CONFIG_GPSP_LCD
     gpsp_p4_nano_lcd_present(pixels, width, height, pitch);
 #endif
+#if CONFIG_GPSP_MENU && CONFIG_ESPEMU
+    s_last_frame = width == GPSP_ESPEMU_SCREEN_WIDTH &&
+            height == GPSP_ESPEMU_SCREEN_HEIGHT &&
+            pitch == GPSP_ESPEMU_SCREEN_PITCH ? pixels : NULL;
+#endif
     return gpsp_espemu_transport_submit_frame(
             pixels, width, height, pitch);
 }
@@ -135,6 +164,10 @@ uint32_t gpsp_board_input_read(void)
 {
     uint32_t input = gpsp_espemu_transport_read_input();
 
+#if CONFIG_GPSP_MENU && CONFIG_ESPEMU
+    if (s_ui_shown && s_ui_session != gpsp_espemu_transport_session())
+        gpsp_espemu_ui_send();
+#endif
 #if CONFIG_GPSP_SERIAL_INPUT
     /* Started on the first poll: boot reads the ROM name on the same UART. */
     gpsp_serial_input_start();
@@ -146,7 +179,73 @@ uint32_t gpsp_board_input_read(void)
     return input;
 }
 
-#if CONFIG_GPSP_MENU
+#if CONFIG_GPSP_MENU && CONFIG_ESPEMU
+bool gpsp_board_ui_begin(uint16_t **pixels, const uint16_t **frame)
+{
+    if (!s_ui_pixels)
+        s_ui_pixels = heap_caps_malloc(GPSP_ESPEMU_UI_FRAME_BYTES,
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    *pixels = s_ui_pixels;
+    *frame = s_last_frame;
+    return s_ui_pixels != NULL;
+}
+
+void gpsp_board_ui_draw(unsigned y0, unsigned y1)
+{
+    /* The host gets the whole screen; frames are small next to TCP. */
+    (void)y0;
+    (void)y1;
+    s_ui_shown = true;
+    gpsp_espemu_ui_send();
+}
+
+void gpsp_board_ui_end(void)
+{
+    s_ui_shown = false;
+}
+
+esp_err_t gpsp_board_wifi_open(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+size_t gpsp_board_wifi_scan(struct gpsp_board_wifi_ap *aps, size_t max)
+{
+    (void)aps;
+    (void)max;
+    return 0;
+}
+
+esp_err_t gpsp_board_wifi_connect(const char *ssid, const char *password,
+        char *address, size_t size, char *psk, size_t psk_size)
+{
+    (void)ssid;
+    (void)password;
+    (void)address;
+    (void)size;
+    (void)psk;
+    (void)psk_size;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+void gpsp_board_wifi_cancel(void)
+{
+}
+
+esp_err_t gpsp_board_wifi_start_ap(const char *ssid, const char *password,
+        char *address, size_t size)
+{
+    (void)ssid;
+    (void)password;
+    (void)address;
+    (void)size;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+void gpsp_board_wifi_close(void)
+{
+}
+#elif CONFIG_GPSP_MENU
 bool gpsp_board_ui_begin(uint16_t **pixels, const uint16_t **frame)
 {
     return gpsp_p4_nano_lcd_ui_begin(pixels, frame);
@@ -299,7 +398,7 @@ void gpsp_board_shutdown(void)
     gpsp_p4_nano_lcd_shutdown();
 #endif
     gpsp_espemu_transport_shutdown();
-#if CONFIG_GPSP_MENU
+#if CONFIG_GPSP_MENU && !CONFIG_ESPEMU
     gpsp_p4_nano_wifi_shutdown();
 #endif
 }

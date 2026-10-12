@@ -40,6 +40,9 @@ void gpsp_espemu_transport_get_output_stats(
 bool gpsp_espemu_transport_submit_frame(
         const uint16_t *pixels, unsigned width, unsigned height, size_t pitch);
 
+/** @return A nonzero ID of the current host connection, or zero when none. */
+uint32_t gpsp_espemu_transport_session(void);
+
 /** @return The latest libretro RetroPad bitmask received from the host. */
 uint16_t gpsp_espemu_transport_read_input(void);
 struct gpsp_board_request gpsp_espemu_transport_read_command(void);

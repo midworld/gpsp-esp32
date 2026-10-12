@@ -6,4 +6,6 @@
 - Checks fatal initialization failure, retry, optional peripheral failure,
   serial shutdown order, and final menu Wi-Fi cleanup.
 - Checks automatic ROM limits around 16 MiB PSRAM and a fixed build override.
+- ESP-EMU menu: the unchanged menu picture goes again to a new or
+  reconnected viewer and after a failed send, and stops when the menu closes.
 - Uses GPL-3.0-or-later; see [COPYING](../../COPYING).

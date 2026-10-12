@@ -252,13 +252,18 @@ menu "gpSP LCD"
         depends on GPSP_LCD
         default n
 
+endmenu
+
+menu "gpSP menu"
+
     config GPSP_MENU
         bool "In-game menu"
-        depends on GPSP_LCD && !GPSP_BENCHMARK
+        depends on (GPSP_LCD || ESPEMU) && !GPSP_BENCHMARK
         default y
         help
             The pad's home button, or Select and Start together, pauses
-            the game and opens a full-screen menu.
+            the game and opens a full-screen menu. ESP-EMU sends it to the
+            host viewer.
 
 endmenu
 

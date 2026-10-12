@@ -22,6 +22,7 @@
  *
  * HELLO payload: width:u16, height:u16, format:u16, flags:u16, fps_mHz:u32
  * FRAME payload: width:u16, height:u16, pitch:u16, format:u16, pixel bytes
+ *   The size is the game screen, or the menu screen while the menu is open.
  * INPUT payload: RetroPad bits:u16, one-shot command:u16
  * STATE_STATUS payload: command:u16, result:u16 (zero is success)
  * PROFILE payload: fifteen u32 values; see GPSP_ESPEMU_PROFILE_* offsets.
@@ -63,6 +64,11 @@ enum gpsp_espemu_profile_offset
 #define GPSP_ESPEMU_SCREEN_PITCH (GPSP_ESPEMU_SCREEN_WIDTH * 2u)
 #define GPSP_ESPEMU_FRAME_BYTES \
     (GPSP_ESPEMU_SCREEN_PITCH * GPSP_ESPEMU_SCREEN_HEIGHT)
+
+#define GPSP_ESPEMU_UI_WIDTH 320u
+#define GPSP_ESPEMU_UI_HEIGHT 240u
+#define GPSP_ESPEMU_UI_FRAME_BYTES \
+    (GPSP_ESPEMU_UI_WIDTH * 2u * GPSP_ESPEMU_UI_HEIGHT)
 
 enum gpsp_espemu_message_type
 {

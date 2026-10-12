@@ -21,7 +21,7 @@
 
 #define GPSP_HOST_RX_CAPACITY \
     (2u * (GPSP_ESPEMU_HEADER_SIZE + GPSP_ESPEMU_FRAME_INFO_SIZE + \
-                    GPSP_ESPEMU_FRAME_BYTES))
+                    GPSP_ESPEMU_UI_FRAME_BYTES))
 #define GPSP_HOST_INPUT_INTERVAL_MS 100u
 #define GPSP_HOST_REPORT_INTERVAL_MS 2000u
 #define GPSP_HOST_PROFILE_HISTORY 120u
@@ -75,6 +75,9 @@ struct gpsp_host_state
     /* The mutex protects the frame fields and their pixel allocation. */
     SDL_mutex *frame_mutex;
     uint8_t *frame_pixels;
+    /* Game screen, or the menu screen while the menu is open. */
+    uint16_t frame_width;
+    uint16_t frame_height;
     uint32_t frame_sequence;
     uint32_t received_frames;
     uint32_t report_frame_count;
@@ -224,8 +227,7 @@ static bool gpsp_host_publish_frame(
     uint8_t *destination;
     unsigned pixel;
 
-    if (payload_size !=
-            GPSP_ESPEMU_FRAME_INFO_SIZE + GPSP_ESPEMU_FRAME_BYTES)
+    if (payload_size < GPSP_ESPEMU_FRAME_INFO_SIZE)
         return false;
 
     width = gpsp_espemu_read_u16(payload);
@@ -233,22 +235,26 @@ static bool gpsp_host_publish_frame(
     pitch = gpsp_espemu_read_u16(payload + 4);
     format = gpsp_espemu_read_u16(payload + 6);
 
-    if (width != GPSP_ESPEMU_SCREEN_WIDTH ||
-            height != GPSP_ESPEMU_SCREEN_HEIGHT ||
-            pitch != GPSP_ESPEMU_SCREEN_PITCH ||
+    if (!((width == GPSP_ESPEMU_SCREEN_WIDTH &&
+                    height == GPSP_ESPEMU_SCREEN_HEIGHT) ||
+            (width == GPSP_ESPEMU_UI_WIDTH &&
+                    height == GPSP_ESPEMU_UI_HEIGHT)) ||
+            pitch != width * 2u ||
+            payload_size != GPSP_ESPEMU_FRAME_INFO_SIZE +
+                    (uint32_t)pitch * height ||
             format != GPSP_ESPEMU_PIXEL_RGB565_LE)
         return false;
 
     SDL_LockMutex(state->frame_mutex);
     destination = state->frame_pixels;
     memcpy(destination, payload + GPSP_ESPEMU_FRAME_INFO_SIZE,
-            GPSP_ESPEMU_FRAME_BYTES);
+            (size_t)pitch * height);
+    state->frame_width = width;
+    state->frame_height = height;
 
 #if SDL_BYTEORDER == SDL_BIG_ENDIAN
     /* SDL's RGB565 texture expects native-endian 16-bit pixel values. */
-    for (pixel = 0;
-            pixel < GPSP_ESPEMU_SCREEN_WIDTH * GPSP_ESPEMU_SCREEN_HEIGHT;
-            pixel++)
+    for (pixel = 0; pixel < (unsigned)width * height; pixel++)
     {
         uint16_t value;
         memcpy(&value, destination + pixel * sizeof(value), sizeof(value));
@@ -1138,6 +1144,9 @@ int main(int argc, char **argv)
     SDL_Thread *network_thread = NULL;
     uint32_t displayed_sequence = UINT32_MAX;
     uint32_t displayed_connection = 0;
+    SDL_Rect source_rect = {
+        0, 0, GPSP_ESPEMU_SCREEN_WIDTH, GPSP_ESPEMU_SCREEN_HEIGHT,
+    };
     int exit_code = 1;
 
     if (argc >= 3 && !strcmp(argv[1], "--serial"))
@@ -1213,7 +1222,7 @@ int main(int argc, char **argv)
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
     state.frame_mutex = SDL_CreateMutex();
-    state.frame_pixels = malloc(GPSP_ESPEMU_FRAME_BYTES);
+    state.frame_pixels = malloc(GPSP_ESPEMU_UI_FRAME_BYTES);
 
     if (!state.frame_mutex || !state.frame_pixels)
     {
@@ -1221,7 +1230,9 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    memset(state.frame_pixels, 0, GPSP_ESPEMU_FRAME_BYTES);
+    memset(state.frame_pixels, 0, GPSP_ESPEMU_UI_FRAME_BYTES);
+    state.frame_width = GPSP_ESPEMU_SCREEN_WIDTH;
+    state.frame_height = GPSP_ESPEMU_SCREEN_HEIGHT;
     gpsp_command_queue_init(&state.commands);
     SDL_AtomicSet(&state.running, 1);
     SDL_AtomicSet(&state.volume_db, GPSP_HOST_VOLUME_UNKNOWN);
@@ -1261,7 +1272,7 @@ int main(int argc, char **argv)
 
     texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB565,
             SDL_TEXTUREACCESS_STREAMING,
-            GPSP_ESPEMU_SCREEN_WIDTH, GPSP_ESPEMU_SCREEN_HEIGHT);
+            GPSP_ESPEMU_UI_WIDTH, GPSP_ESPEMU_UI_HEIGHT);
 
     if (!texture)
     {
@@ -1371,8 +1382,10 @@ int main(int argc, char **argv)
 
         if (state.frame_ready && state.frame_sequence != displayed_sequence)
         {
-            SDL_UpdateTexture(texture, NULL, state.frame_pixels,
-                    GPSP_ESPEMU_SCREEN_PITCH);
+            source_rect.w = state.frame_width;
+            source_rect.h = state.frame_height;
+            SDL_UpdateTexture(texture, &source_rect, state.frame_pixels,
+                    state.frame_width * 2);
             displayed_sequence = state.frame_sequence;
         }
 
@@ -1442,7 +1455,13 @@ int main(int argc, char **argv)
         SDL_Rect game_rect = {
             0, 0, GPSP_ESPEMU_SCREEN_WIDTH, GPSP_ESPEMU_SCREEN_HEIGHT,
         };
-        SDL_RenderCopy(renderer, texture, NULL, &game_rect);
+        /* The 4:3 menu screen fits the game area's height. */
+        if (source_rect.w == GPSP_ESPEMU_UI_WIDTH)
+        {
+            game_rect.w = GPSP_ESPEMU_SCREEN_HEIGHT * 4 / 3;
+            game_rect.x = (GPSP_ESPEMU_SCREEN_WIDTH - game_rect.w) / 2;
+        }
+        SDL_RenderCopy(renderer, texture, &source_rect, &game_rect);
         gpsp_host_draw_emulation_fps(renderer, emulation_fps);
         gpsp_host_draw_profiles(renderer, profiles,
                 profile_count, target_frame_us);

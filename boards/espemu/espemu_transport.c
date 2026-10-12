@@ -42,6 +42,12 @@
 #else
 #define GPSP_ESPEMU_FRAME_BUFFER_COUNT 2
 #endif
+#if CONFIG_GPSP_MENU && !CONFIG_GPSP_LCD
+/* The board sends the menu screen through the same buffers. */
+#define GPSP_ESPEMU_BUFFER_BYTES GPSP_ESPEMU_UI_FRAME_BYTES
+#else
+#define GPSP_ESPEMU_BUFFER_BYTES GPSP_ESPEMU_FRAME_BYTES
+#endif
 #define GPSP_ESPEMU_IP_READY_BIT BIT0
 #define GPSP_ESPEMU_TASK_STOPPED_BIT BIT1
 #define GPSP_ESPEMU_INPUT_TIMEOUT_US 500000
@@ -61,6 +67,8 @@ struct gpsp_espemu_frame
 {
     /* Index identifies a PSRAM buffer owned by exactly one queue or task. */
     uint8_t index;
+    uint16_t width;
+    uint16_t height;
     uint64_t timestamp_us;
 };
 
@@ -411,18 +419,19 @@ static bool gpsp_espemu_send_frame(
 {
     uint8_t prefix[GPSP_ESPEMU_HEADER_SIZE + GPSP_ESPEMU_FRAME_INFO_SIZE];
     uint8_t *frame_info = prefix + GPSP_ESPEMU_HEADER_SIZE;
+    size_t bytes = (size_t)frame->width * 2u * frame->height;
 
     gpsp_espemu_write_header(prefix, GPSP_ESPEMU_MESSAGE_FRAME,
-            GPSP_ESPEMU_FRAME_INFO_SIZE + GPSP_ESPEMU_FRAME_BYTES,
+            GPSP_ESPEMU_FRAME_INFO_SIZE + bytes,
             sequence, frame->timestamp_us);
-    gpsp_espemu_write_u16(frame_info, GPSP_ESPEMU_SCREEN_WIDTH);
-    gpsp_espemu_write_u16(frame_info + 2, GPSP_ESPEMU_SCREEN_HEIGHT);
-    gpsp_espemu_write_u16(frame_info + 4, GPSP_ESPEMU_SCREEN_PITCH);
+    gpsp_espemu_write_u16(frame_info, frame->width);
+    gpsp_espemu_write_u16(frame_info + 2, frame->height);
+    gpsp_espemu_write_u16(frame_info + 4, frame->width * 2u);
     gpsp_espemu_write_u16(frame_info + 6, GPSP_ESPEMU_PIXEL_RGB565_LE);
 
     return gpsp_espemu_send_all(socket_fd, prefix, sizeof(prefix)) &&
             gpsp_espemu_send_all(socket_fd,
-                    s_frame_buffers[frame->index], GPSP_ESPEMU_FRAME_BYTES);
+                    s_frame_buffers[frame->index], bytes);
 }
 
 static uint32_t gpsp_espemu_profile_average(
@@ -860,7 +869,7 @@ esp_err_t gpsp_espemu_transport_init(void)
     for (index = 0; index < GPSP_ESPEMU_FRAME_BUFFER_COUNT; index++)
     {
         s_frame_buffers[index] = heap_caps_malloc(
-                GPSP_ESPEMU_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                GPSP_ESPEMU_BUFFER_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
         if (!s_frame_buffers[index])
         {
@@ -950,9 +959,12 @@ bool gpsp_espemu_transport_submit_frame(
 #endif
 #endif
 
-    if (!pixels || width != GPSP_ESPEMU_SCREEN_WIDTH ||
-            height != GPSP_ESPEMU_SCREEN_HEIGHT ||
-            pitch < GPSP_ESPEMU_SCREEN_PITCH ||
+    if (!pixels || width * 2u * height > GPSP_ESPEMU_BUFFER_BYTES ||
+            !((width == GPSP_ESPEMU_SCREEN_WIDTH &&
+                    height == GPSP_ESPEMU_SCREEN_HEIGHT) ||
+            (width == GPSP_ESPEMU_UI_WIDTH &&
+                    height == GPSP_ESPEMU_UI_HEIGHT)) ||
+            pitch < width * 2u ||
             !atomic_load_explicit(&s_connected, memory_order_acquire))
         return false;
 
@@ -976,17 +988,18 @@ bool gpsp_espemu_transport_submit_frame(
 
     copy_start_us = esp_timer_get_time();
 
-    for (y = 0; y < GPSP_ESPEMU_SCREEN_HEIGHT; y++)
+    for (y = 0; y < height; y++)
     {
-        memcpy(s_frame_buffers[index] + y * GPSP_ESPEMU_SCREEN_PITCH,
-                (const uint8_t *)pixels + y * pitch,
-                GPSP_ESPEMU_SCREEN_PITCH);
+        memcpy(s_frame_buffers[index] + y * width * 2u,
+                (const uint8_t *)pixels + y * pitch, width * 2u);
     }
 
     gpsp_profile_record_copy(
             (uint32_t)(esp_timer_get_time() - copy_start_us));
 
     frame.index = index;
+    frame.width = (uint16_t)width;
+    frame.height = (uint16_t)height;
     frame.timestamp_us = esp_timer_get_time();
 
     if (xQueueSend(s_ready_frames, &frame, 0) != pdTRUE)
@@ -1039,6 +1052,17 @@ struct gpsp_board_request gpsp_espemu_transport_read_command(void)
         }
     portEXIT_CRITICAL(&s_command_lock);
     return request;
+}
+
+uint32_t gpsp_espemu_transport_session(void)
+{
+    uint32_t session = 0;
+
+    portENTER_CRITICAL(&s_command_lock);
+    if (atomic_load_explicit(&s_connected, memory_order_acquire))
+        session = s_command_session;
+    portEXIT_CRITICAL(&s_command_lock);
+    return session;
 }
 
 bool gpsp_espemu_transport_command_valid(struct gpsp_board_request request)
