@@ -89,6 +89,8 @@ static uint32_t s_frame_number;
 static atomic_bool s_running;
 static atomic_bool s_connected;
 static atomic_uint_fast32_t s_input_bits;
+/* A screenshot has no result, so it does not take a command slot. */
+static atomic_bool s_screenshot;
 /* A slot stays until its result is sent, including time in a child screen. */
 static struct
 {
@@ -627,6 +629,9 @@ static bool gpsp_espemu_receive_messages(
                     return false;
                 }
             }
+            else if (command == GPSP_ESPEMU_COMMAND_SCREENSHOT)
+                atomic_store_explicit(&s_screenshot, true,
+                        memory_order_relaxed);
 
             if (previous != input)
                 ESP_LOGI(TAG, "Input changed: bits=0x%03x", input);
@@ -1051,6 +1056,10 @@ struct gpsp_board_request gpsp_espemu_transport_read_command(void)
             }
         }
     portEXIT_CRITICAL(&s_command_lock);
+    if (request.command == GPSP_BOARD_COMMAND_NONE &&
+            atomic_exchange_explicit(&s_screenshot, false,
+                    memory_order_relaxed))
+        request.command = GPSP_BOARD_COMMAND_SCREENSHOT;
     return request;
 }
 

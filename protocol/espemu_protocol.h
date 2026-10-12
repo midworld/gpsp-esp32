@@ -95,7 +95,7 @@ enum gpsp_espemu_command
     GPSP_ESPEMU_COMMAND_QUIT = 6,
     /* Serial input only: press the pad's home button (opens the menu). */
     GPSP_ESPEMU_COMMAND_HOME = 7,
-    /* Serial input only: print the screen to the log as a PNG. */
+    /* Print the screen to the log as a PNG. */
     GPSP_ESPEMU_COMMAND_SCREENSHOT = 8,
 };
 
