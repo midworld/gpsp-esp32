@@ -48,6 +48,7 @@ idf_component_register(
 )
 
 set(GPSP_ROM_PATH "" CACHE STRING "GBA ROM to place in the FATFS image")
+set(GPSP_SD_DIR "" CACHE STRING "Folder to place in the ESP-EMU SD card image")
 
 if(GPSP_ROM_PATH)
     get_filename_component(gpsp_rom_path "${GPSP_ROM_PATH}" ABSOLUTE
@@ -61,7 +62,21 @@ if(GPSP_ROM_PATH)
     file(MAKE_DIRECTORY "${gpsp_storage_dir}")
     configure_file("${gpsp_rom_path}" "${gpsp_storage_dir}/game.gba" COPYONLY)
     fatfs_create_spiflash_image(storage "${gpsp_storage_dir}" FLASH_IN_PROJECT)
-else()
+elseif(NOT GPSP_SD_DIR)
     message(WARNING
         "GPSP_ROM_PATH is not set; the storage image will not be generated")
+endif()
+
+if(GPSP_SD_DIR)
+    get_filename_component(gpsp_sd_dir "${GPSP_SD_DIR}" ABSOLUTE
+        BASE_DIR "${CMAKE_CURRENT_LIST_DIR}/..")
+
+    if(NOT CONFIG_ESPEMU OR NOT CONFIG_GPSP_SD_CARD)
+        message(FATAL_ERROR "GPSP_SD_DIR needs CONFIG_ESPEMU and CONFIG_GPSP_SD_CARD")
+    endif()
+    if(NOT IS_DIRECTORY "${gpsp_sd_dir}")
+        message(FATAL_ERROR "GPSP_SD_DIR is not a folder: ${gpsp_sd_dir}")
+    endif()
+
+    fatfs_create_spiflash_image(sdcard "${gpsp_sd_dir}" FLASH_IN_PROJECT)
 endif()

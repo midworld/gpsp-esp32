@@ -23,13 +23,17 @@
 #include "wear_levelling.h"
 
 #if CONFIG_GPSP_SD_CARD
-#include "diskio_sdmmc.h"
-#include "driver/sdmmc_host.h"
 #include "driver/uart.h"
 #include "esp_timer.h"
+#if CONFIG_ESPEMU
+#include "diskio_wl.h"
+#else
+#include "diskio_sdmmc.h"
+#include "driver/sdmmc_host.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "sdmmc_cmd.h"
-#if CONFIG_GPSP_DCACHE_AUTOLOAD
+#endif
+#if CONFIG_GPSP_DCACHE_AUTOLOAD && !CONFIG_ESPEMU
 #include "esp_cache.h"
 #include "esp_memory_utils.h"
 #include "soc/cache_reg.h"
@@ -59,8 +63,15 @@ static const char *TAG = "gpsp_storage";
 static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 static const char *s_rom_path = GPSP_STORAGE_ROM_PATH;
 #if CONFIG_GPSP_SD_CARD
+#if CONFIG_ESPEMU
+/* ESP-EMU has no SD host; the "sdcard" flash partition stands in. */
+static wl_handle_t s_sd_wl = WL_INVALID_HANDLE;
+#define GPSP_SD_MOUNTED() (s_sd_wl != WL_INVALID_HANDLE)
+#else
 static sdmmc_card_t *s_sd_card;
 static sd_pwr_ctrl_handle_t s_sd_power;
+#define GPSP_SD_MOUNTED() (s_sd_card != NULL)
+#endif
 static char s_sd_rom_path[sizeof(GPSP_SD_ROM_DIR) + 256];
 static char s_sd_save_path[sizeof(GPSP_SD_SAVE_DIR) + 256];
 static char s_sd_state_path[sizeof(GPSP_SD_STATE_DIR) + 256];
@@ -84,7 +95,38 @@ static bool s_skip_auto_load;
 static wl_handle_t s_save_wl_handle = WL_INVALID_HANDLE;
 #endif
 
+#if CONFIG_GPSP_SD_CARD && CONFIG_ESPEMU
+static bool gpsp_sd_mount(void)
+{
+    const esp_vfs_fat_mount_config_t mount_config = {
+        .format_if_mount_failed = false,
+        .max_files = 4,
+        .allocation_unit_size = CONFIG_WL_SECTOR_SIZE,
+    };
+    esp_err_t result = esp_vfs_fat_spiflash_mount_rw_wl(GPSP_SD_MOUNT_PATH,
+            "sdcard", &mount_config, &s_sd_wl);
+
+    if (result != ESP_OK)
+    {
+        ESP_LOGI(TAG, "No SD card: %s", esp_err_to_name(result));
+        s_sd_wl = WL_INVALID_HANDLE;
+        return false;
+    }
+    ESP_LOGI(TAG, "SD card mounted: sdcard partition");
+    return true;
+}
+
+static void gpsp_sd_unmount(void)
+{
+    if (s_sd_wl == WL_INVALID_HANDLE)
+        return;
+    esp_vfs_fat_spiflash_unmount_rw_wl(GPSP_SD_MOUNT_PATH, s_sd_wl);
+    s_sd_wl = WL_INVALID_HANDLE;
+}
+#endif
+
 #if CONFIG_GPSP_SD_CARD
+#if !CONFIG_ESPEMU
 #if CONFIG_GPSP_DCACHE_AUTOLOAD
 /* A fill started before DMA can finish after the driver's invalidation.
    Drain those fills before invalidating the receive buffer again. */
@@ -214,6 +256,7 @@ static void gpsp_sd_unmount(void)
     s_sd_power = NULL;
 #endif
 }
+#endif
 
 /* Trims spaces and line ends in place. */
 static char *gpsp_trim(char *text)
@@ -392,7 +435,7 @@ bool gpsp_storage_config_set(const struct gpsp_storage_setting *settings,
     bool valid;
     bool had_file;
 
-    if (!s_sd_card || count > 32)
+    if (!GPSP_SD_MOUNTED() || count > 32)
         return false;
 
     /* Write aside first so a failed write keeps the old file. */
@@ -467,7 +510,7 @@ static size_t gpsp_find_roms_in(const char *dir_path,
 
 size_t gpsp_storage_find_roms(gpsp_storage_rom_found_fn found, void *user)
 {
-    if (!s_sd_card)
+    if (!GPSP_SD_MOUNTED())
         return 0;
     return gpsp_find_roms_in(GPSP_SD_ROM_DIR, found, user) +
             gpsp_find_roms_in(GPSP_SD_MOUNT_PATH, found, user);
@@ -718,10 +761,14 @@ bool gpsp_storage_card_path(const char *path, char *out, size_t size)
     BYTE drive;
     char *part;
 
-    if (!s_sd_card || strncmp(path, GPSP_SD_MOUNT_PATH, root) ||
+    if (!GPSP_SD_MOUNTED() || strncmp(path, GPSP_SD_MOUNT_PATH, root) ||
             (path[root] && path[root] != '/') || size <= root)
         return false;
+#if CONFIG_ESPEMU
+    drive = ff_diskio_get_pdrv_wl(s_sd_wl);
+#else
     drive = ff_diskio_get_pdrv_card(s_sd_card);
+#endif
     if (drive == 0xff || snprintf(fat_path, sizeof(fat_path), "%u:%s",
             (unsigned)drive, path + root) >= (int)sizeof(fat_path))
         return false;
@@ -801,7 +848,7 @@ bool gpsp_storage_card_path(const char *path, char *out, size_t size)
 #if GPSP_STORAGE_GAME_LIST
 bool gpsp_storage_card(void)
 {
-    return s_sd_card != NULL;
+    return GPSP_SD_MOUNTED();
 }
 
 esp_err_t gpsp_storage_use_requested_rom(void)

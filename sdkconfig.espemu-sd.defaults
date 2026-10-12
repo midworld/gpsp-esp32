@@ -1,0 +1,3 @@
+# ESP-EMU SD card: the "sdcard" flash partition stands in for the card.
+CONFIG_GPSP_SD_CARD=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_espemu_sd.csv"
