@@ -26,6 +26,8 @@
 #include "freertos/task.h"
 
 #include "panels/dsi_panel.h"
+#include "dsi_hud.h"
+#include "dsi_overlay.h"
 
 #define DSI_WIDTH 480
 #define DSI_HEIGHT 800
@@ -41,6 +43,7 @@ static esp_ldo_channel_handle_t s_power;
 /* Separate PPA clients for game and UI transactions. */
 static ppa_client_handle_t s_game_ppa;
 static ppa_client_handle_t s_ui_ppa;
+static ppa_client_handle_t s_overlay_ppa;
 static SemaphoreHandle_t s_frame_done;
 static void *s_frames[DSI_BUFFERS];
 static unsigned s_widths[DSI_BUFFERS];
@@ -51,11 +54,16 @@ static uint16_t *s_color_lut;
 /* One snapshot per frame; UI changes take effect on the next game frame. */
 static atomic_uint s_options;
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
-static struct
+static unsigned s_profile_frames;
+struct dsi_diagnostics
 {
     int64_t start_us, render_max_us, present_max_us;
     unsigned game_frames, ui_frames, errors;
-} s_diag;
+    unsigned options, next;
+};
+static struct dsi_diagnostics s_diag, s_diag_pending;
+static portMUX_TYPE s_diag_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_diag_ready;
 
 static void dsi_diagnostics(bool ui, unsigned options, int64_t start,
         int64_t rendered, esp_err_t result)
@@ -77,14 +85,118 @@ static void dsi_diagnostics(bool ui, unsigned options, int64_t start,
     if (now - s_diag.start_us < 5000000)
         return;
 
-    ESP_LOGI(TAG, "DSI health period_ms=%lld game=%u ui=%u "
-            "render_max_us=%lld present_max_us=%lld errors=%u "
-            "filter=%u color=%u next=%u core=%d",
-            (now - s_diag.start_us) / 1000, s_diag.game_frames, s_diag.ui_frames,
-            s_diag.render_max_us, s_diag.present_max_us, s_diag.errors,
-            options & 0xff, options >> 8, s_next, xPortGetCoreID());
+    s_diag.start_us = now - s_diag.start_us;
+    s_diag.options = options;
+    s_diag.next = s_next;
+    portENTER_CRITICAL(&s_diag_lock);
+    s_diag_pending = s_diag;
+    s_diag_ready = true;
+    portEXIT_CRITICAL(&s_diag_lock);
     memset(&s_diag, 0, sizeof(s_diag));
     s_diag.start_us = now;
+}
+#endif
+
+void gpsp_dsi_status(void)
+{
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    struct dsi_diagnostics diag;
+    bool ready;
+
+    portENTER_CRITICAL(&s_diag_lock);
+    ready = s_diag_ready;
+    diag = s_diag_pending;
+    s_diag_ready = false;
+    portEXIT_CRITICAL(&s_diag_lock);
+    if (ready)
+        ESP_LOGI(TAG, "DSI health period_ms=%lld game=%u ui=%u "
+                "render_max_us=%lld present_max_us=%lld errors=%u "
+                "filter=%u color=%u next=%u",
+                diag.start_us / 1000, diag.game_frames, diag.ui_frames,
+                diag.render_max_us, diag.present_max_us, diag.errors,
+                diag.options & 0xff, diag.options >> 8, diag.next);
+#endif
+}
+
+esp_err_t gpsp_dsi_blend_overlay(uint16_t *frame, const uint32_t *foreground,
+        unsigned width, unsigned height, unsigned x, unsigned y)
+{
+    const ppa_blend_oper_config_t operation = {
+        .in_bg = {
+            .buffer = frame,
+            .pic_w = DSI_WIDTH, .pic_h = DSI_HEIGHT,
+            .block_w = width, .block_h = height,
+            .block_offset_x = x, .block_offset_y = y,
+            .blend_cm = PPA_BLEND_COLOR_MODE_RGB565,
+        },
+        .in_fg = {
+            .buffer = foreground,
+            .pic_w = width, .pic_h = height,
+            .block_w = width, .block_h = height,
+            .blend_cm = PPA_BLEND_COLOR_MODE_ARGB8888,
+        },
+        .out = {
+            .buffer = frame, .buffer_size = DSI_BYTES,
+            .pic_w = DSI_WIDTH, .pic_h = DSI_HEIGHT,
+            .block_offset_x = x, .block_offset_y = y,
+            .blend_cm = PPA_BLEND_COLOR_MODE_RGB565,
+        },
+        .bg_alpha_update_mode = PPA_ALPHA_FIX_VALUE,
+        .bg_alpha_fix_val = 255,
+        .fg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
+        .mode = PPA_TRANS_MODE_BLOCKING,
+    };
+
+    return ppa_do_blend(s_overlay_ppa, &operation);
+}
+
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+static esp_err_t dsi_overlay_check(void)
+{
+    uint16_t *frame = s_frames[1];
+    uint32_t *foreground = (uint32_t *)s_work;
+    const uint32_t colors[] = {0x00ff0000, 0xc0000000, 0xffff0000};
+    const unsigned band_width = 26;
+    const unsigned band_height = 720;
+    const unsigned band_y = 40;
+
+    memset(frame, 0xff, DSI_BYTES);
+    for (unsigned i = 0; i < band_width * band_height; i++)
+        foreground[i] = colors[i % 3];
+    for (unsigned band = 0; band < 2; band++)
+    {
+        esp_err_t result = gpsp_dsi_blend_overlay(frame, foreground,
+                band_width, band_height, band ? DSI_WIDTH - band_width : 0,
+                band_y);
+        if (result != ESP_OK)
+            return result;
+    }
+    for (unsigned y = 0; y < DSI_HEIGHT; y++)
+        for (unsigned x = 0; x < DSI_WIDTH; x++)
+        {
+            uint16_t pixel = frame[y * DSI_WIDTH + x];
+            bool band = (x < band_width || x >= DSI_WIDTH - band_width) &&
+                    y >= band_y && y < band_y + band_height;
+            unsigned fg_x = x < band_width ? x : x - (DSI_WIDTH - band_width);
+            unsigned pattern = band ? ((y - band_y) * band_width + fg_x) % 3 : 0;
+            bool good = pixel == 0xffff;
+
+            if (band && pattern == 1)
+                good = (pixel >> 11) >= 7 && (pixel >> 11) <= 8 &&
+                        ((pixel >> 5) & 63) >= 15 &&
+                        ((pixel >> 5) & 63) <= 16 &&
+                        (pixel & 31) >= 7 && (pixel & 31) <= 8;
+            else if (band && pattern == 2)
+                good = pixel == 0xf800;
+            if (!good)
+            {
+                ESP_LOGE(TAG, "Overlay check failed x=%u y=%u rgb565=%04x",
+                        x, y, pixel);
+                return ESP_FAIL;
+            }
+        }
+    ESP_LOGI(TAG, "PPA overlay alpha and bounds check passed");
+    return ESP_OK;
 }
 #endif
 
@@ -168,6 +280,11 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
             s_color_lut : NULL;
     bool bilinear = !ui && filter == GPSP_DISPLAY_BILINEAR;
     unsigned offset_y = (DSI_HEIGHT - width * scale) / 2;
+    bool hud = !ui && gpsp_dsi_stats_enabled();
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    bool sample = !ui && ((s_profile_frames++ & 15) == 0);
+    int64_t ppa_start = 0, ppa_end = 0, expand_end = 0, hud_end = 0;
+#endif
 
     if (bilinear && lut)
     {
@@ -216,8 +333,16 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
         }
         s_widths[s_next] = width;
     }
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    if (sample)
+        ppa_start = esp_timer_get_time();
+#endif
     esp_err_t result = ppa_do_scale_rotate_mirror(
             ui ? s_ui_ppa : s_game_ppa, &operation);
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    if (sample)
+        ppa_end = esp_timer_get_time();
+#endif
     if (result != ESP_OK)
     {
         ESP_LOGE(TAG, "PPA failed: %s buffer=%u ui=%d filter=%u color=%u",
@@ -248,10 +373,31 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
                 s_work, height, width, DSI_WIDTH, scale, grid_x, grid_y, lut);
     }
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    if (sample)
+        expand_end = esp_timer_get_time();
+#endif
+    if (hud)
+    {
+        esp_err_t overlay = gpsp_dsi_hud_draw(s_frames[s_next]);
+
+        if (overlay != ESP_OK)
+        {
+            gpsp_dsi_set_stats(false);
+            ESP_LOGW(TAG, "STAT blend disabled: %s", esp_err_to_name(overlay));
+        }
+    }
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    if (sample)
+        hud_end = esp_timer_get_time();
     int64_t rendered = esp_timer_get_time();
 #endif
     result = dsi_present();
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    if (sample && result == ESP_OK)
+        gpsp_dsi_hud_sample(hud, (unsigned)(ppa_end - ppa_start),
+                (unsigned)(expand_end - ppa_end),
+                (unsigned)(esp_timer_get_time() - hud_end),
+                hud ? (unsigned)(hud_end - expand_end) : 0);
     dsi_diagnostics(ui, (unsigned)filter | ((unsigned)color << 8),
             start, rendered, result);
 #endif
@@ -301,6 +447,10 @@ esp_err_t gpsp_dsi_init(void)
         .oper_type = PPA_OPERATION_SRM,
         .max_pending_trans_num = 1,
     };
+    const ppa_client_config_t overlay = {
+        .oper_type = PPA_OPERATION_BLEND,
+        .max_pending_trans_num = 1,
+    };
     const esp_lcd_dpi_panel_event_callbacks_t callbacks = {
         .on_frame_buf_complete = dsi_frame_done,
     };
@@ -339,11 +489,16 @@ esp_err_t gpsp_dsi_init(void)
             &callbacks, NULL));
     DSI_TRY(ppa_register_client(&ppa, &s_game_ppa));
     DSI_TRY(ppa_register_client(&ppa, &s_ui_ppa));
+    DSI_TRY(ppa_register_client(&overlay, &s_overlay_ppa));
     DSI_TRY(esp_lcd_panel_init(s_panel));
     memset(s_widths, 0, sizeof(s_widths));
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    DSI_TRY(dsi_overlay_check());
     memset(&s_diag, 0, sizeof(s_diag));
+    s_diag_ready = false;
+    s_profile_frames = 0;
 #endif
+    gpsp_dsi_hud_init();
     /* DPI starts scanning buffer 0. */
     s_next = 1;
     s_ready = true;
@@ -370,6 +525,7 @@ fail:
 void gpsp_dsi_shutdown(void)
 {
     s_ready = false;
+    gpsp_dsi_hud_shutdown();
     gpsp_dsi_panel.backlight(false);
     if (s_panel)
     {
@@ -380,8 +536,11 @@ void gpsp_dsi_shutdown(void)
         ppa_unregister_client(s_game_ppa);
     if (s_ui_ppa)
         ppa_unregister_client(s_ui_ppa);
+    if (s_overlay_ppa)
+        ppa_unregister_client(s_overlay_ppa);
     s_game_ppa = NULL;
     s_ui_ppa = NULL;
+    s_overlay_ppa = NULL;
     if (s_io)
     {
         esp_lcd_panel_io_del(s_io);

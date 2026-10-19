@@ -20,5 +20,8 @@ void gpsp_dsi_options(enum gpsp_display_filter *filter,
         enum gpsp_display_color *color);
 void gpsp_dsi_set_options(enum gpsp_display_filter filter,
         enum gpsp_display_color color);
+bool gpsp_dsi_stats_enabled(void);
+void gpsp_dsi_set_stats(bool enabled);
+void gpsp_dsi_status(void);
 
 #endif

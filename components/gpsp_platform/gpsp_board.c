@@ -187,6 +187,24 @@ void gpsp_board_set_display_options(enum gpsp_display_filter filter,
 #endif
 }
 
+bool gpsp_board_stats(void)
+{
+#if CONFIG_GPSP_LCD_DSI
+    return gpsp_dsi_stats_enabled();
+#else
+    return false;
+#endif
+}
+
+void gpsp_board_set_stats(bool enabled)
+{
+#if CONFIG_GPSP_LCD_DSI
+    gpsp_dsi_set_stats(enabled);
+#else
+    (void)enabled;
+#endif
+}
+
 uint32_t gpsp_board_input_read(void)
 {
     uint32_t input = gpsp_espemu_transport_read_input();

@@ -24,8 +24,10 @@
 
 #include "gpsp_font.h"
 #include "gpsp_screen.h"
+#include "lcd_status.h"
 #if CONFIG_GPSP_LCD_DSI
 #include "gpsp_lcd_dsi.h"
+#include "dsi_hud.h"
 #endif
 
 #if CONFIG_GPSP_LCD_DSI
@@ -62,8 +64,6 @@ _Static_assert(LCD_WIDTH >= LCD_FRAME_WIDTH &&
 #endif
 #define LCD_STATUS_TOP (LCD_OFFSET_Y - LCD_STATUS_BAND + 2)
 #define LCD_STATUS_BOTTOM (LCD_OFFSET_Y + LCD_FRAME_HEIGHT + 2)
-/* Longest text, labels included. */
-#define LCD_TEXT_MAX 8
 /* Columns from the left edge, and back from the right edge. */
 #define LCD_COLUMN(column) (LCD_STATUS_LEFT + (column) * GPSP_FONT_WIDTH)
 #define LCD_RIGHT_COLUMN(column) \
@@ -74,7 +74,6 @@ _Static_assert(LCD_WIDTH >= LCD_FRAME_WIDTH &&
 
 /* Little-endian RGB565. Normal values are light gray; warnings and
    critical values stand out. */
-#define LCD_COLOR_LABEL 0x8410
 #define LCD_COLOR_GOOD 0xd69a
 #define LCD_COLOR_WARN 0xffe0
 #define LCD_COLOR_BAD 0xf800
@@ -135,21 +134,6 @@ static bool s_ui;
 static uint16_t *s_ui_pixels;
 #endif
 
-/* Values in the borders; labels are drawn once at start. */
-enum lcd_field
-{
-    LCD_FIELD_FPS,
-    LCD_FIELD_SPEED,
-    LCD_FIELD_CPU0,
-    LCD_FIELD_CPU1,
-    LCD_FIELD_TEMP,
-    LCD_FIELD_RAM,
-    LCD_FIELD_MIN,
-    LCD_FIELD_PSRAM,
-    LCD_FIELD_PSRAM_SIZE,
-    LCD_FIELD_COUNT,
-};
-
 struct lcd_field_state
 {
     uint16_t x;
@@ -162,17 +146,7 @@ struct lcd_field_state
 
 /* Top:    CPU  38%  6%  36.5C          FPS 59.7  SPD 100%
    Bottom: RAM FREE 110K MIN  96K          PS 11.9/32M */
-static struct lcd_field_state s_fields[LCD_FIELD_COUNT] = {
-    [LCD_FIELD_FPS] = {LCD_RIGHT_COLUMN(14), LCD_STATUS_TOP, 4},
-    [LCD_FIELD_SPEED] = {LCD_RIGHT_COLUMN(4), LCD_STATUS_TOP, 4},
-    [LCD_FIELD_CPU0] = {LCD_COLUMN(4), LCD_STATUS_TOP, 4},
-    [LCD_FIELD_CPU1] = {LCD_COLUMN(9), LCD_STATUS_TOP, 4},
-    [LCD_FIELD_TEMP] = {LCD_COLUMN(14), LCD_STATUS_TOP, 5},
-    [LCD_FIELD_RAM] = {LCD_COLUMN(9), LCD_STATUS_BOTTOM, 4},
-    [LCD_FIELD_MIN] = {LCD_COLUMN(18), LCD_STATUS_BOTTOM, 4},
-    [LCD_FIELD_PSRAM] = {LCD_RIGHT_COLUMN(8), LCD_STATUS_BOTTOM, 4},
-    [LCD_FIELD_PSRAM_SIZE] = {LCD_RIGHT_COLUMN(4), LCD_STATUS_BOTTOM, 4},
-};
+static struct lcd_field_state s_fields[LCD_FIELD_COUNT];
 
 /* First buffer in the given state, or -1. Call with s_lock held. */
 static int gpsp_lcd_find(enum lcd_buffer_state state)
@@ -308,18 +282,16 @@ static void gpsp_lcd_draw_labels(void)
     if (!LCD_STATUS)
         return;
 #if CONFIG_GPSP_STATUS
-    gpsp_lcd_draw_text(LCD_RIGHT_COLUMN(18), LCD_STATUS_TOP, "FPS", 3,
-            LCD_COLOR_LABEL);
-    gpsp_lcd_draw_text(LCD_COLUMN(0), LCD_STATUS_TOP, "CPU", 3,
-            LCD_COLOR_LABEL);
-    gpsp_lcd_draw_text(LCD_RIGHT_COLUMN(8), LCD_STATUS_TOP, "SPD", 3,
-            LCD_COLOR_LABEL);
-    gpsp_lcd_draw_text(LCD_COLUMN(0), LCD_STATUS_BOTTOM, "RAM FREE", 8,
-            LCD_COLOR_LABEL);
-    gpsp_lcd_draw_text(LCD_COLUMN(14), LCD_STATUS_BOTTOM, "MIN", 3,
-            LCD_COLOR_LABEL);
-    gpsp_lcd_draw_text(LCD_RIGHT_COLUMN(11), LCD_STATUS_BOTTOM, "PS", 2,
-            LCD_COLOR_LABEL);
+    for (unsigned i = 0; i < sizeof(lcd_status_labels) /
+            sizeof(lcd_status_labels[0]); i++)
+    {
+        const struct lcd_status_label *label = &lcd_status_labels[i];
+        const struct lcd_status_position *p = &label->position;
+
+        gpsp_lcd_draw_text(p->right ? LCD_RIGHT_COLUMN(p->column) :
+                LCD_COLUMN(p->column), p->bottom ? LCD_STATUS_BOTTOM :
+                LCD_STATUS_TOP, label->text, p->chars, LCD_COLOR_LABEL);
+    }
 #endif
 }
 
@@ -434,6 +406,15 @@ esp_err_t gpsp_lcd_init(void)
 
     esp_err_t result;
 
+    for (int i = 0; i < LCD_FIELD_COUNT; i++)
+    {
+        const struct lcd_status_position *p = &lcd_status_positions[i];
+
+        s_fields[i].x = p->right ? LCD_RIGHT_COLUMN(p->column) :
+                LCD_COLUMN(p->column);
+        s_fields[i].y = p->bottom ? LCD_STATUS_BOTTOM : LCD_STATUS_TOP;
+        s_fields[i].chars = p->chars;
+    }
     s_draw_lock = xSemaphoreCreateMutex();
 #if CONFIG_GPSP_MENU && CONFIG_GPSP_LCD_DSI
     s_ui_done = xSemaphoreCreateBinary();
@@ -605,6 +586,19 @@ void gpsp_lcd_status(unsigned cpu0, unsigned cpu1, int temp_tenths,
             gpsp_lcd_level(psram_free_tenths, 40, 10, false));
     snprintf(text, sizeof(text), "/%uM", psram_mib);
     gpsp_lcd_set_field(LCD_FIELD_PSRAM_SIZE, text, LCD_COLOR_LABEL);
+#if CONFIG_GPSP_LCD_DSI
+    struct lcd_status_value values[LCD_FIELD_COUNT];
+
+    portENTER_CRITICAL(&s_lock);
+    for (int i = 0; i < LCD_FIELD_COUNT; i++)
+    {
+        memcpy(values[i].text, s_fields[i].text, sizeof(values[i].text));
+        values[i].color = s_fields[i].color;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    gpsp_dsi_hud_update(values);
+    gpsp_dsi_status();
+#endif
 }
 
 #if CONFIG_GPSP_MENU

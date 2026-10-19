@@ -283,6 +283,9 @@ menu "gpSP LCD"
         default n
         help
             Log frame counts and peak render/present times every 5 seconds.
+            Sample one in 16 game frames and report phase timings every
+            10 seconds, grouped by STAT on/off. Include PPA blend and
+            text-cache update costs. Logging runs on the status worker.
 
     config GPSP_LCD_SPI_MHZ
         int "SPI clock (MHz)"

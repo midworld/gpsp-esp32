@@ -77,6 +77,8 @@ bool gpsp_board_display_options(enum gpsp_display_filter *filter,
         enum gpsp_display_color *color);
 void gpsp_board_set_display_options(enum gpsp_display_filter filter,
         enum gpsp_display_color color);
+bool gpsp_board_stats(void);
+void gpsp_board_set_stats(bool enabled);
 
 /* Bit above the RetroPad buttons: the pad's home button. */
 #define GPSP_BOARD_INPUT_HOME (1u << 16)

@@ -108,6 +108,7 @@ enum menu_item
     MENU_ITEM_VOLUME,
     MENU_ITEM_DISPLAY,
     MENU_ITEM_COLOR,
+    MENU_ITEM_STATS,
     MENU_ITEM_AUTO_SAVE,
     MENU_ITEM_AUTO_LOAD,
     MENU_ITEM_CONTROLS,
@@ -144,6 +145,7 @@ static const char *const s_item_names[MENU_ITEM_COUNT] = {
     [MENU_ITEM_VOLUME] = "Volume",
     [MENU_ITEM_DISPLAY] = "Display",
     [MENU_ITEM_COLOR] = "Colors",
+    [MENU_ITEM_STATS] = "STAT",
     [MENU_ITEM_AUTO_SAVE] = "Auto Save",
     [MENU_ITEM_AUTO_LOAD] = "Auto Load",
     [MENU_ITEM_TRANSFER] = "File Transfer",
@@ -301,6 +303,8 @@ static bool menu_item_value(enum menu_item item, char *value, size_t size)
     else if (item == MENU_ITEM_COLOR)
         snprintf(value, size, gpsp_settings_display_color() ==
                 GPSP_DISPLAY_COLOR_GBA ? "< GBA LCD >" : "< None >");
+    else if (item == MENU_ITEM_STATS)
+        snprintf(value, size, gpsp_settings_stats() ? "< On >" : "< Off >");
     else if (item == MENU_ITEM_SETTINGS || item == MENU_ITEM_CONTROLS ||
             item == MENU_ITEM_WIFI)
         snprintf(value, size, ">");
@@ -474,7 +478,8 @@ static void menu_build_items(void)
     for (int i = 0; i < MENU_ITEM_COUNT; i++)
         if (menu_item_page((enum menu_item)i) == s_page &&
                 (i != MENU_ITEM_VOLUME || speaker) &&
-                ((i != MENU_ITEM_DISPLAY && i != MENU_ITEM_COLOR) || display) &&
+                ((i != MENU_ITEM_DISPLAY && i != MENU_ITEM_COLOR &&
+                        i != MENU_ITEM_STATS) || display) &&
                 (i != MENU_ITEM_THRESHOLD || automatic) &&
                 (i != MENU_ITEM_GAME_LIST || s_game_list) &&
                 (i != MENU_ITEM_TRANSFER || s_card) &&
@@ -555,6 +560,8 @@ static void menu_direction(uint32_t buttons)
         gpsp_settings_set_display(gpsp_settings_display_filter(),
                 gpsp_settings_display_color() == GPSP_DISPLAY_COLOR_NONE ?
                 GPSP_DISPLAY_COLOR_GBA : GPSP_DISPLAY_COLOR_NONE);
+    else if (s_items[s_cursor] == MENU_ITEM_STATS)
+        gpsp_settings_set_stats(!gpsp_settings_stats());
     else if (s_items[s_cursor] == MENU_ITEM_FAST_FORWARD_SPEED)
     {
         /* Two speeds: either direction picks the other one. */
