@@ -25,4 +25,13 @@ else()
             gpsp mbedtls nvs_flash fatfs sdmmc esp_driver_sdmmc
             ${gpsp_hosted_component} ${gpsp_wifi_remote_component} ${gpsp_usb_component}
     )
+    if(CONFIG_GPSP_USB_PAD_DIAGNOSTICS)
+        # Trace root-port events without changing the USB driver.
+        idf_component_get_property(gpsp_usb_dir ${gpsp_usb_component} COMPONENT_DIR)
+        target_sources(${COMPONENT_LIB} PRIVATE "usb_trace.c")
+        target_include_directories(${COMPONENT_LIB} PRIVATE "${gpsp_usb_dir}/private_include")
+        target_link_options(${COMPONENT_LIB} INTERFACE
+            "-Wl,--wrap=hcd_port_handle_event"
+            "-Wl,--undefined=__wrap_hcd_port_handle_event")
+    endif()
 endif()

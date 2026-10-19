@@ -1410,6 +1410,9 @@ static void gpsp_input_poll(void)
     /* The menu opens after this frame, which already sees no buttons. */
     if (gpsp_menu_requested(input))
     {
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+        ESP_LOGI(TAG, "Menu requested input=0x%05x", (unsigned)input);
+#endif
         s_menu_pending = true;
         s_input_blocked = true;
 #if GPSP_FRAMESKIP
@@ -1683,7 +1686,13 @@ esp_err_t gpsp_frontend_run(const char *rom_path)
         !CONFIG_GPSP_BENCHMARK_STOP_AFTER_REPORT && \
         !CONFIG_GPSP_BENCHMARK_FRESH_SAVE
                 /* A paused game is a good time to write the cartridge. */
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+                ESP_LOGI(TAG, "Menu save flush begin");
+#endif
                 gpsp_save_flush();
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+                ESP_LOGI(TAG, "Menu save flush done");
+#endif
 #endif
                 enum gpsp_menu_result menu = gpsp_menu_run(true);
 

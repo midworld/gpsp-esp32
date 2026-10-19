@@ -1,4 +1,4 @@
-/* ESP32-P4-NANO USB gamepad input on the high-speed OTG port.
+/* ESP32-P4 USB gamepad input on the high-speed OTG port.
  *
  * Copyright (C) 2026 Midworld Kim
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -35,6 +35,8 @@
 /* A failed IN endpoint is reset and read again after this delay. */
 #define PAD_IN_RETRY_US 100000
 #define PAD_OUT_BYTES 64
+/* Service USB before the CPU-side display expansion. */
+#define PAD_TASK_PRIORITY (tskIDLE_PRIORITY + 7)
 /* Home sits above the 16 RetroPad buttons. */
 #define PAD_HOME_ID 16
 
@@ -63,6 +65,8 @@ struct pad_packet
 
 struct pad
 {
+    uint8_t addr;
+    uint16_t vid, pid;
     usb_device_handle_t dev;
     enum pad_proto proto;
     int intf;
@@ -80,6 +84,12 @@ struct pad
     unsigned init_step;
     unsigned init_tries;
     int64_t init_next_us;
+    unsigned in_errors, out_errors, submit_errors, reset_errors, recoveries;
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+    unsigned reports, decoded, changes;
+    int64_t opened_us, last_report_us, last_decoded_us;
+    int64_t report_gap_us, loop_max_us;
+#endif
 #if CONFIG_GPSP_USB_PAD_HID_DUMP
     uint8_t last[64];
     int last_len;
@@ -116,6 +126,58 @@ static atomic_uint s_buttons;
 /* Written by the client event callback, read by the same task. */
 static uint8_t s_new_addr;
 static struct pad s_pad;
+
+static const char *pad_transfer_status(usb_transfer_status_t status)
+{
+    switch (status)
+    {
+        case USB_TRANSFER_STATUS_COMPLETED: return "completed";
+        case USB_TRANSFER_STATUS_ERROR: return "error";
+        case USB_TRANSFER_STATUS_TIMED_OUT: return "timeout";
+        case USB_TRANSFER_STATUS_CANCELED: return "canceled";
+        case USB_TRANSFER_STATUS_STALL: return "stall";
+        case USB_TRANSFER_STATUS_OVERFLOW: return "overflow";
+        case USB_TRANSFER_STATUS_SKIPPED: return "skipped";
+        case USB_TRANSFER_STATUS_NO_DEVICE: return "no-device";
+        default: return "unknown";
+    }
+}
+
+/* Keep a failing endpoint from flooding the console. */
+static bool pad_log_error(unsigned count)
+{
+    return count <= 3 || count % 50 == 0;
+}
+
+static esp_err_t pad_submit(usb_transfer_t *xfer)
+{
+    esp_err_t result = usb_host_transfer_submit(xfer);
+
+    if (result != ESP_OK && pad_log_error(++s_pad.submit_errors))
+        ESP_LOGW(TAG, "Submit addr=%u ep=0x%02x: %s count=%u",
+                s_pad.addr, xfer->bEndpointAddress, esp_err_to_name(result),
+                s_pad.submit_errors);
+    return result;
+}
+
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+static void pad_health(int64_t now)
+{
+    ESP_LOGI(TAG, "USB health addr=%u %04x:%04x rx=%u decoded=%u changes=%u "
+            "rx_age_ms=%lld input_age_ms=%lld gap_max_ms=%lld loop_max_ms=%lld "
+            "busy=%d/%d halt=%d/%d err=%u/%u submit_err=%u reset_err=%u recover=%u",
+            s_pad.addr, s_pad.vid, s_pad.pid, s_pad.reports, s_pad.decoded,
+            s_pad.changes,
+            s_pad.last_report_us ? (now - s_pad.last_report_us) / 1000 : -1LL,
+            s_pad.last_decoded_us ? (now - s_pad.last_decoded_us) / 1000 : -1LL,
+            s_pad.report_gap_us / 1000, s_pad.loop_max_us / 1000,
+            s_pad.in_busy, s_pad.out_busy, s_pad.in_halted, s_pad.out_halted,
+            s_pad.in_errors, s_pad.out_errors, s_pad.submit_errors,
+            s_pad.reset_errors, s_pad.recoveries);
+    s_pad.report_gap_us = 0;
+    s_pad.loop_max_us = 0;
+}
+#endif
 
 static void pad_set(unsigned *buttons, bool pressed, unsigned id)
 {
@@ -289,6 +351,17 @@ static void pad_in_done(usb_transfer_t *xfer)
 
     if (xfer->status == USB_TRANSFER_STATUS_COMPLETED)
     {
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+        int64_t now = esp_timer_get_time();
+        int64_t gap = now - (s_pad.last_report_us ? s_pad.last_report_us :
+                s_pad.opened_us);
+        if (gap > s_pad.report_gap_us)
+            s_pad.report_gap_us = gap;
+        s_pad.last_report_us = now;
+        if (++s_pad.reports == 1)
+            ESP_LOGI(TAG, "First report addr=%u len=%d head=%02x %02x",
+                    s_pad.addr, len, len > 0 ? r[0] : 0, len > 1 ? r[1] : 0);
+#endif
         switch (s_pad.proto)
         {
             case PAD_PROTO_XINPUT:
@@ -326,8 +399,25 @@ static void pad_in_done(usb_transfer_t *xfer)
 
         /* Other reports (LED state, command replies) keep the last state. */
         if (decoded)
+        {
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+            s_pad.decoded++;
+            s_pad.last_decoded_us = now;
+            if ((buttons ^ atomic_load(&s_buttons)) & (1u << PAD_HOME_ID))
+                ESP_LOGI(TAG, "HOME %s addr=%u buttons=0x%05x",
+                        buttons & (1u << PAD_HOME_ID) ? "down" : "up",
+                        s_pad.addr, buttons);
+            if (buttons != atomic_load(&s_buttons))
+                s_pad.changes++;
+#endif
             atomic_store(&s_buttons, buttons);
+        }
     }
+    else if (pad_log_error(++s_pad.in_errors))
+        ESP_LOGW(TAG, "IN addr=%u ep=0x%02x status=%s bytes=%d/%d "
+                "gone=%d count=%u", s_pad.addr, xfer->bEndpointAddress,
+                pad_transfer_status(xfer->status), len, xfer->num_bytes,
+                s_pad.gone, s_pad.in_errors);
 
     if (s_pad.gone || !atomic_load(&s_running) ||
             xfer->status == USB_TRANSFER_STATUS_NO_DEVICE ||
@@ -335,15 +425,13 @@ static void pad_in_done(usb_transfer_t *xfer)
         return;
 
     if (xfer->status == USB_TRANSFER_STATUS_COMPLETED &&
-            usb_host_transfer_submit(xfer) == ESP_OK)
+            pad_submit(xfer) == ESP_OK)
     {
         s_pad.in_busy = true;
         return;
     }
 
     /* Release held buttons while the client task recovers the endpoint. */
-    if (xfer->status != USB_TRANSFER_STATUS_COMPLETED)
-        ESP_LOGW(TAG, "IN transfer status %d", xfer->status);
     atomic_store(&s_buttons, 0);
     s_pad.in_halted = true;
     s_pad.in_retry_us = esp_timer_get_time() + PAD_IN_RETRY_US;
@@ -362,14 +450,27 @@ static void pad_out_done(usb_transfer_t *xfer)
     else if (xfer->status != USB_TRANSFER_STATUS_NO_DEVICE &&
             xfer->status != USB_TRANSFER_STATUS_CANCELED)
         s_pad.out_halted = true;
+    if (xfer->status != USB_TRANSFER_STATUS_COMPLETED &&
+            pad_log_error(++s_pad.out_errors))
+        ESP_LOGW(TAG, "OUT addr=%u ep=0x%02x status=%s init=%u/%u count=%u",
+                s_pad.addr, xfer->bEndpointAddress,
+                pad_transfer_status(xfer->status), s_pad.init_step,
+                s_pad.init_count, s_pad.out_errors);
 }
 
 /* Clears a halted host pipe so it takes transfers again. */
 static void pad_endpoint_reset(uint8_t address)
 {
-    usb_host_endpoint_halt(s_pad.dev, address);
-    usb_host_endpoint_flush(s_pad.dev, address);
-    usb_host_endpoint_clear(s_pad.dev, address);
+    esp_err_t halt = usb_host_endpoint_halt(s_pad.dev, address);
+    esp_err_t flush = usb_host_endpoint_flush(s_pad.dev, address);
+    esp_err_t clear = usb_host_endpoint_clear(s_pad.dev, address);
+
+    if ((halt != ESP_OK || flush != ESP_OK || clear != ESP_OK) &&
+            pad_log_error(++s_pad.reset_errors))
+        ESP_LOGW(TAG, "Reset addr=%u ep=0x%02x halt=%s flush=%s clear=%s count=%u",
+                s_pad.addr, address, esp_err_to_name(halt),
+                esp_err_to_name(flush), esp_err_to_name(clear),
+                s_pad.reset_errors);
 }
 
 static enum pad_proto pad_detect(const usb_device_desc_t *dev_desc,
@@ -479,6 +580,9 @@ static enum pad_proto pad_find_interface(const usb_device_desc_t *dev_desc,
 
 static void pad_close(void)
 {
+    ESP_LOGI(TAG, "Close addr=%u gone=%d in_err=%u out_err=%u recover=%u",
+            s_pad.addr, s_pad.gone, s_pad.in_errors, s_pad.out_errors,
+            s_pad.recoveries);
     if (s_pad.in_xfer)
         usb_host_transfer_free(s_pad.in_xfer);
     if (s_pad.out_xfer)
@@ -498,19 +602,33 @@ static void pad_open(uint8_t addr)
     const usb_ep_desc_t *in;
     const usb_ep_desc_t *out;
     uint16_t mps;
+    esp_err_t result;
+    const char *stage = "device descriptor";
 
     memset(&s_pad, 0, sizeof(s_pad));
     s_pad.intf = -1;
+    s_pad.addr = addr;
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+    s_pad.opened_us = esp_timer_get_time();
+#endif
 
     /* A pad that switches modes can leave before it is opened. */
-    if (usb_host_device_open(s_client, addr, &s_pad.dev) != ESP_OK)
+    result = usb_host_device_open(s_client, addr, &s_pad.dev);
+    if (result != ESP_OK)
     {
+        ESP_LOGW(TAG, "Open addr=%u failed: %s", addr, esp_err_to_name(result));
         s_pad.dev = NULL;
         return;
     }
 
-    if (usb_host_get_device_descriptor(s_pad.dev, &dev_desc) != ESP_OK ||
-            usb_host_get_active_config_descriptor(s_pad.dev, &config) != ESP_OK)
+    result = usb_host_get_device_descriptor(s_pad.dev, &dev_desc);
+    if (result != ESP_OK)
+        goto fail;
+    s_pad.vid = dev_desc->idVendor;
+    s_pad.pid = dev_desc->idProduct;
+    stage = "config descriptor";
+    result = usb_host_get_active_config_descriptor(s_pad.dev, &config);
+    if (result != ESP_OK)
         goto fail;
 
     s_pad.proto = pad_find_interface(dev_desc, config, &intf, &in, &out);
@@ -518,17 +636,22 @@ static void pad_open(uint8_t addr)
     {
         ESP_LOGI(TAG, "ignoring USB device %04x:%04x", dev_desc->idVendor,
                 dev_desc->idProduct);
-        goto fail;
+        pad_close();
+        return;
     }
 
-    if (usb_host_interface_claim(s_client, s_pad.dev,
-            intf->bInterfaceNumber, 0) != ESP_OK)
+    stage = "claim interface";
+    result = usb_host_interface_claim(s_client, s_pad.dev,
+            intf->bInterfaceNumber, 0);
+    if (result != ESP_OK)
         goto fail;
     s_pad.intf = intf->bInterfaceNumber;
 
     /* Interrupt IN transfers must be a multiple of the packet size. */
     mps = USB_EP_DESC_GET_MPS(in);
-    if (usb_host_transfer_alloc(mps, 0, &s_pad.in_xfer) != ESP_OK)
+    stage = "allocate IN";
+    result = usb_host_transfer_alloc(mps, 0, &s_pad.in_xfer);
+    if (result != ESP_OK)
         goto fail;
     s_pad.in_xfer->device_handle = s_pad.dev;
     s_pad.in_xfer->bEndpointAddress = in->bEndpointAddress;
@@ -537,8 +660,9 @@ static void pad_open(uint8_t addr)
 
     if (out)
     {
-        if (usb_host_transfer_alloc(PAD_OUT_BYTES, 0, &s_pad.out_xfer) !=
-                ESP_OK)
+        stage = "allocate OUT";
+        result = usb_host_transfer_alloc(PAD_OUT_BYTES, 0, &s_pad.out_xfer);
+        if (result != ESP_OK)
             goto fail;
         s_pad.out_xfer->device_handle = s_pad.dev;
         s_pad.out_xfer->bEndpointAddress = out->bEndpointAddress;
@@ -562,15 +686,22 @@ static void pad_open(uint8_t addr)
     }
     s_pad.init_next_us = esp_timer_get_time() + 2 * PAD_INIT_GAP_US;
 
-    if (usb_host_transfer_submit(s_pad.in_xfer) != ESP_OK)
+    stage = "submit IN";
+    result = pad_submit(s_pad.in_xfer);
+    if (result != ESP_OK)
         goto fail;
     s_pad.in_busy = true;
 
-    ESP_LOGI(TAG, "USB pad %04x:%04x (%s)", dev_desc->idVendor,
-            dev_desc->idProduct, s_proto_names[s_pad.proto]);
+    ESP_LOGI(TAG, "USB pad %04x:%04x (%s) addr=%u intf=%d "
+            "IN=0x%02x mps=%u interval=%u OUT=0x%02x",
+            s_pad.vid, s_pad.pid, s_proto_names[s_pad.proto], addr, s_pad.intf,
+            in->bEndpointAddress, mps, in->bInterval,
+            out ? out->bEndpointAddress : 0);
     return;
 
 fail:
+    ESP_LOGW(TAG, "Setup addr=%u stage=%s: %s", addr, stage,
+            esp_err_to_name(result));
     pad_close();
 }
 
@@ -606,7 +737,7 @@ static void pad_send_init(void)
     packet = &s_pad.init[s_pad.init_step];
     memcpy(xfer->data_buffer, packet->data, packet->len);
     xfer->num_bytes = packet->len;
-    if (usb_host_transfer_submit(xfer) == ESP_OK)
+    if (pad_submit(xfer) == ESP_OK)
         s_pad.out_busy = true;
 }
 
@@ -617,10 +748,14 @@ static void pad_recover_in(void)
         return;
 
     pad_endpoint_reset(s_pad.in_xfer->bEndpointAddress);
-    if (usb_host_transfer_submit(s_pad.in_xfer) == ESP_OK)
+    if (pad_submit(s_pad.in_xfer) == ESP_OK)
     {
         s_pad.in_halted = false;
         s_pad.in_busy = true;
+        if (pad_log_error(++s_pad.recoveries))
+            ESP_LOGI(TAG, "IN resubmitted addr=%u ep=0x%02x count=%u",
+                    s_pad.addr, s_pad.in_xfer->bEndpointAddress,
+                    s_pad.recoveries);
     }
     else
         s_pad.in_retry_us = esp_timer_get_time() + PAD_IN_RETRY_US;
@@ -632,10 +767,19 @@ static void pad_client_event(const usb_host_client_event_msg_t *msg,
     (void)arg;
 
     if (msg->event == USB_HOST_CLIENT_EVENT_NEW_DEV)
+    {
+        ESP_LOGI(TAG, "USB NEW_DEV addr=%u active_addr=%u",
+                msg->new_dev.address, s_pad.dev ? s_pad.addr : 0);
         s_new_addr = msg->new_dev.address;
+    }
     else if (msg->event == USB_HOST_CLIENT_EVENT_DEV_GONE &&
             msg->dev_gone.dev_hdl == s_pad.dev)
     {
+        ESP_LOGW(TAG, "USB DEV_GONE addr=%u %04x:%04x busy=%d/%d",
+                s_pad.addr, s_pad.vid, s_pad.pid, s_pad.in_busy, s_pad.out_busy);
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+        pad_health(esp_timer_get_time());
+#endif
         s_pad.gone = true;
         atomic_store(&s_buttons, 0);
     }
@@ -658,6 +802,10 @@ static void pad_cancel(void)
 static void pad_client_task(void *arg)
 {
     (void)arg;
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+    int64_t last_loop_us = esp_timer_get_time();
+    int64_t next_health_us = last_loop_us + 5000000;
+#endif
 
     while (atomic_load(&s_running))
     {
@@ -680,6 +828,18 @@ static void pad_client_task(void *arg)
             pad_recover_in();
             pad_send_init();
         }
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+        int64_t now = esp_timer_get_time();
+        if (s_pad.dev && now - last_loop_us > s_pad.loop_max_us)
+            s_pad.loop_max_us = now - last_loop_us;
+        last_loop_us = now;
+        if (now >= next_health_us)
+        {
+            if (s_pad.dev)
+                pad_health(now);
+            next_health_us = now + 5000000;
+        }
+#endif
     }
 
     if (s_pad.dev)
@@ -716,6 +876,8 @@ static void pad_lib_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
+    ESP_LOGI(TAG, "USB host started core=%d priority=%u", xPortGetCoreID(),
+            (unsigned)uxTaskPriorityGet(NULL));
 
     for (;;)
     {
@@ -761,7 +923,7 @@ esp_err_t gpsp_usb_pad_init(void)
     atomic_store(&s_running, true);
     atomic_store(&s_buttons, 0);
     if (xTaskCreatePinnedToCore(pad_lib_task, "gpsp_usb_lib", 4096,
-            xTaskGetCurrentTaskHandle(), tskIDLE_PRIORITY + 3, &s_lib_task,
+            xTaskGetCurrentTaskHandle(), PAD_TASK_PRIORITY, &s_lib_task,
             PAD_TASK_CORE) != pdPASS)
     {
         s_lib_task = NULL;
@@ -780,7 +942,7 @@ esp_err_t gpsp_usb_pad_init(void)
     atomic_store(&s_client_active, true);
 
     if (xTaskCreatePinnedToCore(pad_client_task, "gpsp_usb_pad", 4096, NULL,
-            tskIDLE_PRIORITY + 3, &s_client_task, PAD_TASK_CORE) != pdPASS)
+            PAD_TASK_PRIORITY, &s_client_task, PAD_TASK_CORE) != pdPASS)
     {
         usb_host_client_deregister(s_client);
         s_client = NULL;

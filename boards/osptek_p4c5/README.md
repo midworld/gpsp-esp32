@@ -1,6 +1,8 @@
 # OSPTEK P4C5
 
 - ESP32-P4 v3.x, 16 MiB flash, 32 MiB PSRAM, ESP32-C5.
+- PSRAM clock: 200 MHz.
+- USB and DSI diagnostic summaries: every 5 seconds while active.
 - Carrier reference: V1.3; panel: YDP430BT009-V1, ST7102.
 - `board.c`: wiring and available hardware.
 - `sdkconfig.defaults`: default panel and enabled services.

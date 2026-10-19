@@ -277,6 +277,13 @@ menu "gpSP LCD"
             Expand eight RGB565 pixels at a time for nearest and LCD grid.
             Bilinear stays on PPA. Disable for emulator models without PIE.
 
+    config GPSP_LCD_DSI_DIAGNOSTICS
+        bool "Log DSI frame timing summaries"
+        depends on GPSP_LCD_DSI
+        default n
+        help
+            Log frame counts and peak render/present times every 5 seconds.
+
     config GPSP_LCD_SPI_MHZ
         int "SPI clock (MHz)"
         depends on GPSP_LCD_SPI
@@ -336,6 +343,14 @@ menu "gpSP USB gamepad"
             Gamepad on the P4 Nano USB-A port: XInput (Xbox 360 class),
             Xbox One, Switch Pro Controller, DualShock 4 or DualSense,
             wired or through a 2.4 GHz dongle.
+
+    config GPSP_USB_PAD_DIAGNOSTICS
+        bool "Log USB gamepad health summaries"
+        depends on GPSP_USB_PAD
+        default n
+        help
+            Log report counts, report age, endpoint errors and client task
+            delays every 5 seconds. Quiet devices are not treated as lost.
 
     config GPSP_USB_PAD_HID_DUMP
         bool "Log raw reports of other HID devices"

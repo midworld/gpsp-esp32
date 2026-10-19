@@ -20,6 +20,7 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_ldo_regulator.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -49,6 +50,43 @@ static uint16_t *s_work;
 static uint16_t *s_color_lut;
 /* One snapshot per frame; UI changes take effect on the next game frame. */
 static atomic_uint s_options;
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+static struct
+{
+    int64_t start_us, render_max_us, present_max_us;
+    unsigned game_frames, ui_frames, errors;
+} s_diag;
+
+static void dsi_diagnostics(bool ui, unsigned options, int64_t start,
+        int64_t rendered, esp_err_t result)
+{
+    int64_t now = esp_timer_get_time();
+
+    if (!s_diag.start_us)
+        s_diag.start_us = start;
+    if (rendered - start > s_diag.render_max_us)
+        s_diag.render_max_us = rendered - start;
+    if (now - rendered > s_diag.present_max_us)
+        s_diag.present_max_us = now - rendered;
+    if (result != ESP_OK)
+        s_diag.errors++;
+    else if (ui)
+        s_diag.ui_frames++;
+    else
+        s_diag.game_frames++;
+    if (now - s_diag.start_us < 5000000)
+        return;
+
+    ESP_LOGI(TAG, "DSI health period_ms=%lld game=%u ui=%u "
+            "render_max_us=%lld present_max_us=%lld errors=%u "
+            "filter=%u color=%u next=%u core=%d",
+            (now - s_diag.start_us) / 1000, s_diag.game_frames, s_diag.ui_frames,
+            s_diag.render_max_us, s_diag.present_max_us, s_diag.errors,
+            options & 0xff, options >> 8, s_next, xPortGetCoreID());
+    memset(&s_diag, 0, sizeof(s_diag));
+    s_diag.start_us = now;
+}
+#endif
 
 void gpsp_dsi_options(enum gpsp_display_filter *filter,
         enum gpsp_display_color *color)
@@ -103,7 +141,8 @@ static esp_err_t dsi_present(void)
     {
         /* Do not reuse a buffer whose scanout state is unknown. */
         s_ready = false;
-        ESP_LOGE(TAG, "Frame submission failed: %s", esp_err_to_name(result));
+        ESP_LOGE(TAG, "Frame submission failed: %s buffer=%u",
+                esp_err_to_name(result), s_next);
         return result;
     }
     s_next = (s_next + 1) % DSI_BUFFERS;
@@ -114,6 +153,9 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
 {
     if (!s_ready || !pixels)
         return ESP_ERR_INVALID_STATE;
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    int64_t start = esp_timer_get_time();
+#endif
 
     unsigned width = ui ? 320 : 240;
     unsigned height = ui ? 240 : 160;
@@ -167,14 +209,24 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
         esp_err_t result = esp_cache_msync(s_frames[s_next], DSI_BYTES,
                 ESP_CACHE_MSYNC_FLAG_DIR_C2M);
         if (result != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Buffer clear sync failed: %s buffer=%u",
+                    esp_err_to_name(result), s_next);
             return result;
+        }
         s_widths[s_next] = width;
     }
     esp_err_t result = ppa_do_scale_rotate_mirror(
             ui ? s_ui_ppa : s_game_ppa, &operation);
     if (result != ESP_OK)
     {
-        ESP_LOGE(TAG, "PPA failed: %s", esp_err_to_name(result));
+        ESP_LOGE(TAG, "PPA failed: %s buffer=%u ui=%d filter=%u color=%u",
+                esp_err_to_name(result), s_next, ui, (unsigned)filter,
+                (unsigned)color);
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+        dsi_diagnostics(ui, (unsigned)filter | ((unsigned)color << 8),
+                start, esp_timer_get_time(), result);
+#endif
         return result;
     }
     if (!bilinear)
@@ -195,7 +247,15 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
         gpsp_display_expand((uint16_t *)s_frames[s_next] + offset_y * DSI_WIDTH,
                 s_work, height, width, DSI_WIDTH, scale, grid_x, grid_y, lut);
     }
-    return dsi_present();
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    int64_t rendered = esp_timer_get_time();
+#endif
+    result = dsi_present();
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    dsi_diagnostics(ui, (unsigned)filter | ((unsigned)color << 8),
+            start, rendered, result);
+#endif
+    return result;
 }
 
 esp_err_t gpsp_dsi_clear(void)
@@ -281,6 +341,9 @@ esp_err_t gpsp_dsi_init(void)
     DSI_TRY(ppa_register_client(&ppa, &s_ui_ppa));
     DSI_TRY(esp_lcd_panel_init(s_panel));
     memset(s_widths, 0, sizeof(s_widths));
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    memset(&s_diag, 0, sizeof(s_diag));
+#endif
     /* DPI starts scanning buffer 0. */
     s_next = 1;
     s_ready = true;
@@ -293,6 +356,9 @@ esp_err_t gpsp_dsi_init(void)
 #endif
     ESP_LOGI(TAG, "%s: 800x480, game 3x, UI 2x, SIMD %s",
             gpsp_dsi_panel.name, simd);
+    ESP_LOGI(TAG, "DSI clock=%.1fMHz lanes=2 rate=%uMbps buffers=%u init_core=%d",
+            (double)gpsp_dsi_panel.clock_mhz, gpsp_dsi_panel.lane_mbps,
+            DSI_BUFFERS, xPortGetCoreID());
     return ESP_OK;
 
 fail:

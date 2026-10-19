@@ -20,6 +20,7 @@
 #include "freertos/task.h"
 
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 
 #include "gpsp_board.h"
@@ -914,6 +915,9 @@ enum gpsp_menu_result gpsp_menu_run(bool in_game)
     int64_t repeat_us = 0;
     enum gpsp_menu_result result = GPSP_MENU_RESUME;
 
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+    ESP_LOGI("gpsp_menu", "Menu begin in_game=%d", in_game);
+#endif
     if (!gpsp_board_ui_begin(&s_pixels, &s_frame))
         return GPSP_MENU_RESUME;
     s_in_game = in_game;
@@ -937,6 +941,9 @@ enum gpsp_menu_result gpsp_menu_run(bool in_game)
                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_preview_state = MENU_PREVIEW_STALE;
     menu_redraw();
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+    ESP_LOGI("gpsp_menu", "Menu ready");
+#endif
 
     /* Buttons held when the menu opens are not presses. */
     held = gpsp_board_input_read();
@@ -1124,6 +1131,9 @@ enum gpsp_menu_result gpsp_menu_run(bool in_game)
         gpsp_ui_set_game(false);
     gpsp_board_ui_end();
     gpsp_settings_save();
+#if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
+    ESP_LOGI("gpsp_menu", "Menu end result=%d", result);
+#endif
     return result;
 }
 
