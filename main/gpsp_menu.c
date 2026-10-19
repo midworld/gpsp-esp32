@@ -105,6 +105,8 @@ enum menu_item
     MENU_ITEM_FRAMESKIP,
     MENU_ITEM_THRESHOLD,
     MENU_ITEM_VOLUME,
+    MENU_ITEM_DISPLAY,
+    MENU_ITEM_COLOR,
     MENU_ITEM_AUTO_SAVE,
     MENU_ITEM_AUTO_LOAD,
     MENU_ITEM_CONTROLS,
@@ -139,6 +141,8 @@ static const char *const s_item_names[MENU_ITEM_COUNT] = {
     [MENU_ITEM_FRAMESKIP] = "Frameskip",
     [MENU_ITEM_THRESHOLD] = "Threshold",
     [MENU_ITEM_VOLUME] = "Volume",
+    [MENU_ITEM_DISPLAY] = "Display",
+    [MENU_ITEM_COLOR] = "Colors",
     [MENU_ITEM_AUTO_SAVE] = "Auto Save",
     [MENU_ITEM_AUTO_LOAD] = "Auto Load",
     [MENU_ITEM_TRANSFER] = "File Transfer",
@@ -285,6 +289,17 @@ static bool menu_item_value(enum menu_item item, char *value, size_t size)
         snprintf(value, size, gpsp_settings_auto_save() ? "< On >" : "< Off >");
     else if (item == MENU_ITEM_AUTO_LOAD)
         snprintf(value, size, gpsp_settings_auto_load() ? "< On >" : "< Off >");
+    else if (item == MENU_ITEM_DISPLAY)
+    {
+        static const char *const names[] = {
+            "3x Nearest", "3x Bilinear", "3x LCD Grid",
+        };
+
+        snprintf(value, size, "< %s >", names[gpsp_settings_display_filter()]);
+    }
+    else if (item == MENU_ITEM_COLOR)
+        snprintf(value, size, gpsp_settings_display_color() ==
+                GPSP_DISPLAY_COLOR_GBA ? "< GBA LCD >" : "< None >");
     else if (item == MENU_ITEM_SETTINGS || item == MENU_ITEM_CONTROLS ||
             item == MENU_ITEM_WIFI)
         snprintf(value, size, ">");
@@ -450,6 +465,7 @@ static void menu_scroll_name(int64_t now_us)
 static void menu_build_items(void)
 {
     bool speaker = gpsp_board_audio_volume_step(0) != INT_MIN;
+    bool display = gpsp_settings_display_available();
     bool automatic =
             gpsp_settings_frameskip() == GPSP_SETTINGS_FRAMESKIP_AUTO;
 
@@ -457,6 +473,7 @@ static void menu_build_items(void)
     for (int i = 0; i < MENU_ITEM_COUNT; i++)
         if (menu_item_page((enum menu_item)i) == s_page &&
                 (i != MENU_ITEM_VOLUME || speaker) &&
+                ((i != MENU_ITEM_DISPLAY && i != MENU_ITEM_COLOR) || display) &&
                 (i != MENU_ITEM_THRESHOLD || automatic) &&
                 (i != MENU_ITEM_GAME_LIST || s_game_list) &&
                 (i != MENU_ITEM_TRANSFER || s_card) &&
@@ -525,6 +542,18 @@ static void menu_direction(uint32_t buttons)
     else if (s_items[s_cursor] == MENU_ITEM_AUTO_LOAD)
         gpsp_settings_set_auto(gpsp_settings_auto_save(),
                 !gpsp_settings_auto_load());
+    else if (s_items[s_cursor] == MENU_ITEM_DISPLAY)
+    {
+        unsigned filter = gpsp_settings_display_filter();
+
+        filter += buttons & MENU_BUTTON(RIGHT) ? 1 : GPSP_DISPLAY_FILTER_COUNT - 1;
+        gpsp_settings_set_display(filter % GPSP_DISPLAY_FILTER_COUNT,
+                gpsp_settings_display_color());
+    }
+    else if (s_items[s_cursor] == MENU_ITEM_COLOR)
+        gpsp_settings_set_display(gpsp_settings_display_filter(),
+                gpsp_settings_display_color() == GPSP_DISPLAY_COLOR_NONE ?
+                GPSP_DISPLAY_COLOR_GBA : GPSP_DISPLAY_COLOR_NONE);
     else if (s_items[s_cursor] == MENU_ITEM_FAST_FORWARD_SPEED)
     {
         /* Two speeds: either direction picks the other one. */

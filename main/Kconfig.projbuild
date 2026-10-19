@@ -1,3 +1,7 @@
+config GPSP_BOARD_NAME
+    string
+    default "$(GPSP_BUILD_BOARD)"
+
 # Copyright (C) 2026 Midworld Kim
 # SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -226,15 +230,56 @@ menu "gpSP LCD"
     depends on IDF_TARGET_ESP32P4 && !ESPEMU
 
     config GPSP_LCD
-        bool "Show the game on an SPI ST7789 LCD"
+        bool "Show the game on an LCD"
         default n
         help
-            320x240 ST7789 panel on SPI2: SCLK=20, MOSI=21, CS=5, DC=26,
-            RST=25, BL=32. The 240x160 frame is drawn 1:1 in the center.
+            Select the connected display.
+
+    choice GPSP_LCD_TYPE
+        prompt "Display type"
+        depends on GPSP_LCD
+        default GPSP_LCD_SPI
+
+        config GPSP_LCD_SPI
+            bool "SPI ST7789 (320x240)"
+            help
+                SPI2: SCLK=20, MOSI=21, CS=5, DC=26, RST=25, BL=32.
+                The game and UI are drawn 1:1 in the center.
+
+        config GPSP_LCD_DSI
+            bool "MIPI DSI (480x800)"
+            help
+                Two-lane MIPI DSI. Panel control depends on the selected model.
+                Landscape output: games 3x, UI 2x nearest.
+                The menu selects nearest, PPA bilinear, or an LCD grid,
+                with a separate color profile. Touch input is not enabled.
+    endchoice
+
+    choice GPSP_LCD_DSI_MODEL
+        prompt "DSI panel"
+        depends on GPSP_LCD_DSI
+        default GPSP_LCD_DSI_4_3
+
+        config GPSP_LCD_DSI_4
+            bool "4-DSI-TOUCH-A"
+
+        config GPSP_LCD_DSI_4_3
+            bool "4.3-DSI-TOUCH-A"
+        config GPSP_LCD_DSI_OSPTEK
+            bool "OSPTEK YDP430BT009 (ST7102)"
+    endchoice
+
+    config GPSP_LCD_DSI_SIMD
+        bool "Use PIE SIMD for DSI integer scaling"
+        depends on GPSP_LCD_DSI
+        default y
+        help
+            Expand eight RGB565 pixels at a time for nearest and LCD grid.
+            Bilinear stays on PPA. Disable for emulator models without PIE.
 
     config GPSP_LCD_SPI_MHZ
         int "SPI clock (MHz)"
-        depends on GPSP_LCD
+        depends on GPSP_LCD_SPI
         range 10 80
         default 40
 
@@ -245,7 +290,7 @@ menu "gpSP LCD"
 
     config GPSP_LCD_INVERT_COLORS
         bool "Enable panel color inversion"
-        depends on GPSP_LCD
+        depends on GPSP_LCD_SPI
         default y
 
     config GPSP_LCD_ROTATE_180
@@ -339,7 +384,7 @@ menu "gpSP audio"
         bool "Play sound on the onboard speaker"
         default n
         help
-            ES8311 DAC and amplifier of the P4 Nano. The core makes sound at
+            ES8311 DAC and board amplifier. The core makes sound at
             32,768 Hz and the I2S clock runs at the same rate, so samples
             only need a mono mix.
 

@@ -7,6 +7,10 @@ if(NOT "$ENV{GPSP_BUILD_ESPEMU}" STREQUAL "1" AND
         "Physical gpSP backend supports esp32p4 only; set CONFIG_ESPEMU=y for ESP-EMU")
 endif()
 
+if(NOT "$ENV{GPSP_BUILD_ESPEMU}" STREQUAL "1")
+    set(gpsp_storage_device gpsp_devices)
+endif()
+
 idf_component_register(
     SRCS
         "app_main.c"
@@ -33,17 +37,15 @@ idf_component_register(
         esp32p4
         esp32s31
     PRIV_REQUIRES
-        espemu
-        esp_driver_sdmmc
+        gpsp_platform
+        ${gpsp_storage_device}
         esp_driver_uart
         esp_http_server
-        esp_mm
         esp_timer
         fatfs
         gpsp
         gpsp_font
         heap
-        sdmmc
         wear_levelling
 )
 

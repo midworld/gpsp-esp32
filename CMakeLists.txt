@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.16)
 
-set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/boards/espemu")
+set(EXTRA_COMPONENT_DIRS "")
 
 # Requirement expansion runs before Kconfig loads. Read a generated sdkconfig
 # when present, or the defaults used to create it on a clean build.
@@ -47,21 +47,57 @@ else()
     endforeach()
 endif()
 
-if(gpsp_espemu_enabled)
+if(NOT DEFINED GPSP_BOARD)
+    if(gpsp_espemu_enabled)
+        set(GPSP_BOARD espemu)
+    else()
+        set(GPSP_BOARD p4_nano)
+    endif()
+endif()
+set(GPSP_BOARD "${GPSP_BOARD}" CACHE STRING "gpSP board")
+set_property(CACHE GPSP_BOARD PROPERTY STRINGS p4_nano osptek_p4c5 espemu)
+if(NOT GPSP_BOARD MATCHES "^(p4_nano|osptek_p4c5|espemu)$")
+    message(FATAL_ERROR "Unknown GPSP_BOARD: ${GPSP_BOARD}")
+endif()
+if(EXISTS "${gpsp_sdkconfig}")
+    file(STRINGS "${gpsp_sdkconfig}" gpsp_saved_board
+        REGEX "^CONFIG_GPSP_BOARD_NAME=\"[^\"]+\"$")
+    if(gpsp_saved_board AND NOT gpsp_saved_board STREQUAL
+            "CONFIG_GPSP_BOARD_NAME=\"${GPSP_BOARD}\"")
+        message(FATAL_ERROR "sdkconfig belongs to another board; use a separate SDKCONFIG")
+    endif()
+endif()
+if(DEFINED GPSP_CONFIGURED_BOARD AND NOT GPSP_CONFIGURED_BOARD STREQUAL GPSP_BOARD)
+    message(FATAL_ERROR "Use a separate build directory and sdkconfig for each board")
+endif()
+set(GPSP_CONFIGURED_BOARD "${GPSP_BOARD}" CACHE INTERNAL "Configured board")
+set(ENV{GPSP_BUILD_BOARD} "${GPSP_BOARD}")
+set(ENV{GPSP_BOARD_DIR} "${CMAKE_CURRENT_LIST_DIR}/boards/${GPSP_BOARD}")
+include("boards/${GPSP_BOARD}/board.cmake")
+if(NOT DEFINED SDKCONFIG_DEFAULTS)
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;${gpsp_board_defaults}")
+endif()
+if(GPSP_BOARD STREQUAL "espemu")
     set(ENV{GPSP_BUILD_ESPEMU} "1")
 else()
     set(ENV{GPSP_BUILD_ESPEMU} "0")
-    if(NOT DEFINED SDKCONFIG_DEFAULTS)
-        set(SDKCONFIG_DEFAULTS
-            "sdkconfig.defaults;sdkconfig.p4_nano.defaults")
-    endif()
-    list(APPEND EXTRA_COMPONENT_DIRS
-        "${CMAKE_CURRENT_LIST_DIR}/boards/p4_nano")
 endif()
 if(DEFINED ENV{GPSP_EXTRA_COMPONENT_DIRS})
     list(APPEND EXTRA_COMPONENT_DIRS $ENV{GPSP_EXTRA_COMPONENT_DIRS})
 endif()
 
+if(NOT DEFINED IDF_TARGET AND NOT GPSP_BOARD STREQUAL "espemu")
+    set(IDF_TARGET esp32p4 CACHE STRING "IDF target")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 idf_build_set_property(MINIMAL_BUILD ON)
 project(gpsp_esp32)
+
+if(NOT CONFIG_GPSP_BOARD_NAME STREQUAL GPSP_BOARD)
+    message(FATAL_ERROR "sdkconfig belongs to ${CONFIG_GPSP_BOARD_NAME}; use a separate SDKCONFIG for ${GPSP_BOARD}")
+endif()
+if((GPSP_BOARD STREQUAL "espemu" AND NOT CONFIG_ESPEMU) OR
+        (NOT GPSP_BOARD STREQUAL "espemu" AND CONFIG_ESPEMU))
+    message(FATAL_ERROR "GPSP_BOARD and CONFIG_ESPEMU disagree")
+endif()

@@ -1,2 +1,1 @@
-# ESP-EMU is opt-in; ordinary builds target physical hardware.
-CONFIG_ESPEMU=y
+boards/espemu/sdkconfig.defaults

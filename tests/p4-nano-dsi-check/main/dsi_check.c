@@ -1,0 +1,305 @@
+/* DSI framebuffer and PPA checks on hardware or a peripheral model.
+ *
+ * Copyright (C) 2026 Midworld Kim
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+#include <assert.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include "esp_heap_caps.h"
+#include "gpsp_lcd.h"
+#include "gpsp_i2c.h"
+/* Inspect output buffers without adding a firmware diagnostic API. */
+#include "../../../components/gpsp_video/dsi.c"
+
+#if CONFIG_DSI_CHECK_MODEL
+void display_model_fail_init(void);
+unsigned display_model_ppa_scale(void);
+unsigned display_model_ppa_source_pixels(void);
+unsigned display_model_ppa_core(void);
+#endif
+void display_settings_check(uint16_t *ui);
+
+static bool ppa_done(ppa_client_handle_t client,
+        ppa_event_data_t *event, void *arg)
+{
+    BaseType_t woken = pdFALSE;
+    (void)client;
+    (void)event;
+    xSemaphoreGiveFromISR(arg, &woken);
+    return woken == pdTRUE;
+}
+
+static void fill(uint16_t *pixels, unsigned width, unsigned height)
+{
+    const uint16_t colors[] = {0xf800, 0x07e0, 0x001f, 0xffff};
+    for (unsigned y = 0; y < height; y++)
+        for (unsigned x = 0; x < width; x++)
+            pixels[y * width + x] = colors[(y >= height / 2) * 2 +
+                    (x >= width / 2)];
+}
+
+static uint16_t *last_frame(void)
+{
+    uint16_t *pixels = s_frames[(s_next + DSI_BUFFERS - 1) % DSI_BUFFERS];
+    ESP_ERROR_CHECK(esp_cache_msync(pixels, DSI_BYTES,
+            ESP_CACHE_MSYNC_FLAG_DIR_M2C));
+    return pixels;
+}
+
+static void check_frame(unsigned margin)
+{
+    uint16_t *pixels = last_frame();
+    for (unsigned y = 0; y < DSI_HEIGHT; y++)
+        if (y < margin || y >= DSI_HEIGHT - margin)
+            for (unsigned x = 0; x < DSI_WIDTH; x++)
+                assert(pixels[y * DSI_WIDTH + x] == 0);
+#if CONFIG_GPSP_LCD_ROTATE_180
+    assert(pixels[200 * DSI_WIDTH + 100] == 0x001f);
+    assert(pixels[200 * DSI_WIDTH + 380] == 0xf800);
+    assert(pixels[600 * DSI_WIDTH + 100] == 0xffff);
+    assert(pixels[600 * DSI_WIDTH + 380] == 0x07e0);
+#else
+    assert(pixels[200 * DSI_WIDTH + 100] == 0x07e0);
+    assert(pixels[200 * DSI_WIDTH + 380] == 0xffff);
+    assert(pixels[600 * DSI_WIDTH + 100] == 0xf800);
+    assert(pixels[600 * DSI_WIDTH + 380] == 0x001f);
+#endif
+}
+
+static uint16_t landscape_pixel(const uint16_t *pixels, unsigned x, unsigned y)
+{
+#if CONFIG_GPSP_LCD_ROTATE_180
+    return pixels[x * DSI_WIDTH + DSI_WIDTH - 1 - y];
+#else
+    return pixels[(DSI_HEIGHT - 1 - x) * DSI_WIDTH + y];
+#endif
+}
+
+static void check_color_lut(void)
+{
+    const uint16_t samples[] = {0, 0xffff, 0xf800, 0x07e0, 0x001f,
+        0x8410, 0xffe0, 0x07ff, 0xf81f};
+    const double matrix[3][3] = {
+        {0.905, 0.195, -0.10}, {0.10, 0.65, 0.25}, {0.1575, 0.1425, 0.70},
+    };
+    const unsigned shifts[] = {11, 5, 0};
+    const unsigned maxima[] = {31, 63, 31};
+
+    assert(s_color_lut[0] == 0 && s_color_lut[0xffff] != 0xffff);
+    for (unsigned i = 0; i < sizeof(samples) / sizeof(samples[0]); i++)
+        for (unsigned channel = 0; channel < 3; channel++)
+        {
+            double linear = 0;
+            for (unsigned c = 0; c < 3; c++)
+            {
+                double value = (samples[i] >> shifts[c]) & maxima[c];
+                linear += matrix[channel][c] * pow(value / maxima[c], 2.2);
+            }
+            linear = fmin(1, fmax(0, linear * 0.91));
+            int expected = (int)round(pow(linear, 1.0 / 2.2) * maxima[channel]);
+            int actual = (s_color_lut[samples[i]] >> shifts[channel]) & maxima[channel];
+            assert(abs(actual - expected) <= 1);
+        }
+}
+
+static void check_effects(uint16_t *input, uint16_t *ui)
+{
+    check_color_lut();
+    /* Vary every source pixel to catch lane order and replication errors. */
+    for (unsigned y = 0; y < 160; y++)
+        for (unsigned x = 0; x < 240; x++)
+            input[y * 240 + x] = (uint16_t)(x * 577 + y * 19);
+    for (unsigned color = 0; color < GPSP_DISPLAY_COLOR_COUNT; color++)
+        for (unsigned grid = 0; grid < 2; grid++)
+        {
+            gpsp_dsi_set_options(grid ? GPSP_DISPLAY_LCD_GRID :
+                    GPSP_DISPLAY_NEAREST, color);
+            ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+#if CONFIG_DSI_CHECK_MODEL
+            assert(display_model_ppa_scale() == 1);
+            assert(display_model_ppa_source_pixels() == 240 * 160);
+#endif
+            const uint16_t *pixels = last_frame();
+            for (unsigned y = 0; y < 480; y++)
+                for (unsigned x = 0; x < 800; x++)
+                {
+                    uint16_t actual = landscape_pixel(pixels, x, y);
+                    if (x < 40 || x >= 760)
+                    {
+                        assert(actual == 0);
+                        continue;
+                    }
+                    unsigned px = x - 40;
+                    uint16_t expected = input[(y / 3) * 240 + px / 3];
+                    if (color)
+                        expected = s_color_lut[expected];
+                    if (grid)
+                    {
+                        unsigned edges = (px % 3 == 2) + (y % 3 == 2);
+                        unsigned r = expected >> 11;
+                        unsigned g = (expected >> 5) & 63;
+                        unsigned b = expected & 31;
+                        while (edges--)
+                        {
+                            r = (3 * r + 2) / 4;
+                            g = (3 * g + 2) / 4;
+                            b = (3 * b + 2) / 4;
+                        }
+                        expected = (r << 11) | (g << 5) | b;
+                    }
+                    assert(actual == expected);
+                }
+        }
+
+    /* Bilinear keeps the source-sized color pass for PPA to scale. */
+    fill(input, 240, 160);
+    for (unsigned color = 0; color < GPSP_DISPLAY_COLOR_COUNT; color++)
+    {
+        gpsp_dsi_set_options(GPSP_DISPLAY_BILINEAR, color);
+        ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+#if CONFIG_DSI_CHECK_MODEL
+        assert(display_model_ppa_scale() == 3);
+#endif
+        const uint16_t *pixels = last_frame();
+        assert(landscape_pixel(pixels, 100, 100) ==
+                (color ? s_color_lut[0xf800] : 0xf800));
+    }
+    /* UI always uses nearest 2x and unchanged colors in every game mode. */
+    for (unsigned i = 0; i < 320 * 240; i++)
+        ui[i] = (uint16_t)(i * 37);
+    for (unsigned filter = 0; filter < GPSP_DISPLAY_FILTER_COUNT; filter++)
+    {
+        gpsp_dsi_set_options(filter, GPSP_DISPLAY_COLOR_GBA);
+        gpsp_lcd_ui_draw(120, 121);
+#if CONFIG_DSI_CHECK_MODEL
+        assert(display_model_ppa_scale() == 1);
+        assert(display_model_ppa_source_pixels() == 320 * 240);
+#if !CONFIG_FREERTOS_UNICORE
+        assert(display_model_ppa_core() == 1);
+#endif
+#endif
+        const uint16_t *pixels = last_frame();
+        for (unsigned y = 0; y < 480; y++)
+            for (unsigned x = 0; x < 800; x++)
+                assert(landscape_pixel(pixels, x, y) == (x < 80 || x >= 720 ?
+                        0 : ui[(y / 2) * 320 + (x - 80) / 2]));
+    }
+    gpsp_dsi_set_options(GPSP_DISPLAY_NEAREST, GPSP_DISPLAY_COLOR_NONE);
+    puts("DSI_CHECK display effects pass");
+}
+
+static void display_check(void *arg)
+{
+    (void)arg;
+    printf("DSI_CHECK CPU%u\n", (unsigned)xPortGetCoreID());
+#if CONFIG_DSI_CHECK_MODEL
+    puts("DSI_CHECK test-only peripheral model");
+#endif
+    /* Check PPA independently, before probing the panel control bus. */
+    const ppa_client_config_t client_config = {.oper_type = PPA_OPERATION_SRM};
+    ppa_client_handle_t client;
+    uint16_t *input = heap_caps_aligned_alloc(64, 240 * 160 * 2,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    void *output = heap_caps_aligned_alloc(64, DSI_BYTES,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    assert(input && output);
+    fill(input, 240, 160);
+    memset(output, 0, DSI_BYTES);
+    ESP_ERROR_CHECK(esp_cache_msync(output, DSI_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M));
+    ESP_ERROR_CHECK(ppa_register_client(&client_config, &client));
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    assert(done);
+    const ppa_event_callbacks_t callbacks = {.on_trans_done = ppa_done};
+    ESP_ERROR_CHECK(ppa_client_register_event_callbacks(client, &callbacks));
+    const ppa_srm_oper_config_t operation = {
+        .in = {.buffer = input, .pic_w = 240, .pic_h = 160,
+            .block_w = 240, .block_h = 160, .srm_cm = PPA_SRM_COLOR_MODE_RGB565},
+        .out = {.buffer = output, .buffer_size = DSI_BYTES,
+            .pic_w = DSI_WIDTH, .pic_h = DSI_HEIGHT, .block_offset_y = 40,
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB565},
+        .rotation_angle = PPA_SRM_ROTATION_ANGLE_90,
+        .scale_x = 3, .scale_y = 3, .mode = PPA_TRANS_MODE_NON_BLOCKING,
+        .user_data = done,
+    };
+    puts("DSI_CHECK PPA begin");
+    ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(client, &operation));
+    if (!xSemaphoreTake(done, pdMS_TO_TICKS(1000)))
+    {
+        puts("DSI_CHECK FAIL: PPA completion timed out");
+        abort();
+    }
+    ESP_ERROR_CHECK(esp_cache_msync(output, DSI_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_M2C));
+    assert(((uint16_t *)output)[200 * DSI_WIDTH + 100] == 0x07e0);
+    ESP_ERROR_CHECK(ppa_unregister_client(client));
+    vSemaphoreDelete(done);
+    heap_caps_free(output);
+    puts("DSI_CHECK PPA pass");
+
+    i2c_master_bus_handle_t shared_bus;
+    ESP_ERROR_CHECK(gpsp_i2c_acquire(&shared_bus));
+    ESP_ERROR_CHECK(gpsp_lcd_init());
+    uint16_t *claimed = gpsp_lcd_next_buffer();
+    assert(claimed);
+    fill(claimed, 240, 160);
+    unsigned next = s_next;
+    assert(gpsp_lcd_present(claimed, 240, 160, 240 * 2));
+    for (unsigned wait = 0; s_next == next && wait < 1000; wait++)
+        vTaskDelay(1);
+    assert(s_next != next);
+#if CONFIG_DSI_CHECK_MODEL && !CONFIG_FREERTOS_UNICORE
+    assert(display_model_ppa_core() == 1);
+#endif
+    /* Stop the worker at the public UI boundary before inspecting buffers. */
+    uint16_t *ui;
+    const uint16_t *frame;
+    assert(gpsp_lcd_ui_begin(&ui, &frame));
+    assert(frame == claimed);
+    assert(memcmp(frame, input, 240 * 160 * 2) == 0);
+    check_frame(40);
+    for (unsigned i = 0; i < 9; i++)
+    {
+        ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+        check_frame(40);
+    }
+    fill(ui, 320, 240);
+    for (unsigned i = 0; i < 9; i++)
+    {
+        gpsp_lcd_ui_draw(100, 101);
+        check_frame(80);
+    }
+    for (unsigned i = 0; i < 9; i++)
+    {
+        ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+        check_frame(40);
+    }
+    check_effects(input, ui);
+    display_settings_check(ui);
+    gpsp_lcd_ui_end();
+    const uint16_t *blank = s_frames[(s_next + DSI_BUFFERS - 1) % DSI_BUFFERS];
+    for (unsigned i = 0; i < DSI_WIDTH * DSI_HEIGHT; i++)
+        assert(blank[i] == 0);
+    gpsp_lcd_shutdown();
+#if CONFIG_DSI_CHECK_MODEL
+    display_model_fail_init();
+    assert(gpsp_lcd_init() == ESP_FAIL);
+#endif
+    ESP_ERROR_CHECK(gpsp_lcd_init());
+    gpsp_lcd_shutdown();
+    i2c_master_bus_handle_t same_bus;
+    ESP_ERROR_CHECK(gpsp_i2c_acquire(&same_bus));
+    assert(same_bus == shared_bus);
+    gpsp_i2c_release();
+    gpsp_i2c_release();
+    heap_caps_free(input);
+    puts("DSI_CHECK PASS");
+    vTaskDelete(NULL);
+}
+
+void app_main(void)
+{
+    assert(xTaskCreatePinnedToCore(display_check, "dsi_check", 8192, NULL,
+            4, NULL, 1) == pdPASS);
+}

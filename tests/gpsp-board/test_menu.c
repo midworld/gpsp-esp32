@@ -39,6 +39,13 @@ int main(void)
     static uint16_t game[GPSP_ESPEMU_SCREEN_WIDTH * GPSP_ESPEMU_SCREEN_HEIGHT];
     uint16_t *pixels;
     const uint16_t *frame;
+    enum gpsp_display_filter filter;
+    enum gpsp_display_color color;
+
+    assert(!gpsp_board_display_options(&filter, &color));
+    gpsp_board_set_display_options(GPSP_DISPLAY_LCD_GRID, GPSP_DISPLAY_COLOR_GBA);
+    assert(!gpsp_board_display_options(&filter, &color));
+    assert(filter == GPSP_DISPLAY_NEAREST && color == GPSP_DISPLAY_COLOR_NONE);
 
     /* The menu shows the last game frame behind it. */
     gpsp_board_video_present(game, GPSP_ESPEMU_SCREEN_WIDTH,

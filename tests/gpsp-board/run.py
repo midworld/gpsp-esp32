@@ -64,11 +64,12 @@ def compile_test(build, source, config):
     command += ["-std=c11", "-Wall", "-Wextra", "-Werror", "-O1",
                 "-ffunction-sections", "-fdata-sections"]
     command += shlex.split(os.environ.get("CFLAGS", ""))
-    for path in [build, ROOT / "boards/espemu", ROOT / "boards/espemu/include",
-                 ROOT / "boards/p4_nano/include", ROOT / "protocol",
+    for path in [build, ROOT / "components/gpsp_platform", ROOT / "components/gpsp_platform/include",
+                 ROOT / "components/gpsp_devices/include", ROOT / "components/gpsp_video/include", ROOT / "protocol",
+                 ROOT / "components/gpsp_display/include",
                  ROOT / "components/gpsp/core/include"]:
         command += ["-I", str(path)]
-    command += [str(ROOT / "boards/espemu/espemu_board.c"),
+    command += [str(ROOT / "components/gpsp_platform/gpsp_board.c"),
                 str(Path(__file__).with_name(source)),
                 "-Wl,-dead_strip" if sys.platform == "darwin" else
                 "-Wl,--gc-sections", "-o", str(build / "test")]

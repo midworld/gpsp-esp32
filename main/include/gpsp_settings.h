@@ -9,6 +9,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "gpsp_display.h"
 
 /* Frameskip: 0 draws every frame, 1-9 frames are skipped after each drawn
    one, and auto skips while the speaker queue runs low. */
@@ -35,6 +36,12 @@ bool gpsp_settings_take_core_update(void);
 bool gpsp_settings_auto_save(void);
 bool gpsp_settings_auto_load(void);
 void gpsp_settings_set_auto(bool save, bool load);
+
+bool gpsp_settings_display_available(void);
+enum gpsp_display_filter gpsp_settings_display_filter(void);
+enum gpsp_display_color gpsp_settings_display_color(void);
+void gpsp_settings_set_display(enum gpsp_display_filter filter,
+        enum gpsp_display_color color);
 
 /* Functions a pad button can be given. Each has one button or none, and
    no two share one. The D-pad, Home and the menu's buttons stay fixed. */

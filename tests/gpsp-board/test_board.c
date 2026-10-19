@@ -45,39 +45,39 @@ static void test_rom_limit(void)
     }
 }
 
-esp_err_t gpsp_p4_nano_lcd_init(void)
+esp_err_t gpsp_lcd_init(void)
 {
     lcd = true;
     return peripheral_result;
 }
 
-void gpsp_p4_nano_lcd_shutdown(void) { lcd = false; }
+void gpsp_lcd_shutdown(void) { lcd = false; }
 
-esp_err_t gpsp_p4_nano_audio_init(void)
+esp_err_t gpsp_audio_init(void)
 {
     audio = peripheral_result == ESP_OK;
     return peripheral_result;
 }
 
-void gpsp_p4_nano_audio_shutdown(void)
+void gpsp_audio_shutdown(void)
 {
     assert(!serial);
     audio = false;
 }
 
-int gpsp_p4_nano_audio_volume_step(int steps)
+int gpsp_audio_volume_step(int steps)
 {
     assert(audio);
     return -6 + steps;
 }
 
-esp_err_t gpsp_p4_nano_usb_pad_init(void)
+esp_err_t gpsp_usb_pad_init(void)
 {
     usb = peripheral_result == ESP_OK;
     return peripheral_result;
 }
 
-void gpsp_p4_nano_usb_pad_shutdown(void) { usb = false; }
+void gpsp_usb_pad_shutdown(void) { usb = false; }
 void gpsp_status_start(void) { status = true; }
 
 void gpsp_status_stop(void)
@@ -89,7 +89,7 @@ void gpsp_status_stop(void)
 void gpsp_serial_input_start(void) { serial = true; }
 void gpsp_serial_input_stop(void) { serial = false; }
 uint32_t gpsp_serial_input_read(void) { return 0; }
-uint32_t gpsp_p4_nano_usb_pad_read(void) { return 0; }
+uint32_t gpsp_usb_pad_read(void) { return 0; }
 uint16_t gpsp_espemu_transport_read_input(void) { return 0; }
 
 esp_err_t gpsp_espemu_transport_init(void)
@@ -99,7 +99,7 @@ esp_err_t gpsp_espemu_transport_init(void)
 }
 
 void gpsp_espemu_transport_shutdown(void) { transport = false; }
-void gpsp_p4_nano_wifi_shutdown(void) { menu_wifi = false; }
+void gpsp_wifi_shutdown(void) { menu_wifi = false; }
 
 static void assert_stopped(void)
 {

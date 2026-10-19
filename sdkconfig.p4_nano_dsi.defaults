@@ -1,0 +1,4 @@
+# Waveshare 4.3-DSI-TOUCH-A; use after sdkconfig.p4_nano.defaults.
+CONFIG_GPSP_LCD=y
+CONFIG_GPSP_LCD_DSI=y
+CONFIG_GPSP_LCD_DSI_4_3=y

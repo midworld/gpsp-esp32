@@ -11,6 +11,8 @@
  *                               none
  *   fast_forward_speed=2|3      game frames run for each one shown
  *   fast_forward_mode=hold|toggle
+ *   display_filter=nearest|bilinear|lcd_grid
+ *   display_color=none|gba      DSI game output only
  *   last_rom=<name>             the ROM last started, for the game list
  *   wifi_ssid=<name>            the Wi-Fi network the menu joins
  *   wifi_password=<text>        its password, as plain text
@@ -56,6 +58,15 @@ struct gpsp_settings
     unsigned controls[GPSP_SETTINGS_CONTROL_COUNT];
     unsigned fast_forward_speed;
     bool fast_forward_toggle;
+    enum gpsp_display_filter display_filter;
+    enum gpsp_display_color display_color;
+};
+
+static const char *const s_filter_keys[GPSP_DISPLAY_FILTER_COUNT] = {
+    "nearest", "bilinear", "lcd_grid",
+};
+static const char *const s_color_keys[GPSP_DISPLAY_COLOR_COUNT] = {
+    "none", "gba",
 };
 
 static const char *const s_control_keys[GPSP_SETTINGS_CONTROL_COUNT] = {
@@ -153,6 +164,8 @@ static void gpsp_settings_current(struct gpsp_settings *settings)
     memcpy(settings->controls, s_controls, sizeof(s_controls));
     settings->fast_forward_speed = s_fast_forward_speed;
     settings->fast_forward_toggle = s_fast_forward_toggle;
+    gpsp_board_display_options(&settings->display_filter,
+            &settings->display_color);
 }
 
 /* Parse a button name; leave the value unchanged for unknown names. */
@@ -248,6 +261,22 @@ void gpsp_settings_load(void)
     if (gpsp_storage_config("fast_forward_mode", value, sizeof(value)))
         s_fast_forward_toggle = !strcmp(value, "toggle");
 
+    if (gpsp_settings_display_available())
+    {
+        enum gpsp_display_filter filter = GPSP_DISPLAY_NEAREST;
+        enum gpsp_display_color color = GPSP_DISPLAY_COLOR_NONE;
+
+        if (gpsp_storage_config("display_filter", value, sizeof(value)))
+            for (unsigned i = 0; i < GPSP_DISPLAY_FILTER_COUNT; i++)
+                if (!strcmp(value, s_filter_keys[i]))
+                    filter = i;
+        if (gpsp_storage_config("display_color", value, sizeof(value)))
+            for (unsigned i = 0; i < GPSP_DISPLAY_COLOR_COUNT; i++)
+                if (!strcmp(value, s_color_keys[i]))
+                    color = i;
+        gpsp_settings_set_display(filter, color);
+    }
+
     gpsp_settings_current(&s_saved);
     ESP_LOGI(TAG, "Settings: frameskip=%d threshold=%u%% volume=%d slot=%d "
             "auto_save=%d auto_load=%d fast_forward=%ux%s", s_saved.frameskip,
@@ -258,7 +287,7 @@ void gpsp_settings_load(void)
 
 void gpsp_settings_save(void)
 {
-    struct gpsp_storage_setting settings[9 + GPSP_SETTINGS_CONTROL_COUNT];
+    struct gpsp_storage_setting settings[11 + GPSP_SETTINGS_CONTROL_COUNT];
     char controls[GPSP_SETTINGS_CONTROL_COUNT][8];
     char speed[4];
     char frameskip[8];
@@ -329,9 +358,51 @@ void gpsp_settings_save(void)
         settings[count++] = (struct gpsp_storage_setting){
             "fast_forward_mode", now.fast_forward_toggle ? "toggle" : "hold" };
 
+    if (gpsp_settings_display_available())
+    {
+        if (now.display_filter != s_saved.display_filter)
+            settings[count++] = (struct gpsp_storage_setting){
+                "display_filter", s_filter_keys[now.display_filter] };
+        if (now.display_color != s_saved.display_color)
+            settings[count++] = (struct gpsp_storage_setting){
+                "display_color", s_color_keys[now.display_color] };
+    }
+
     /* Without a card the settings last until power off. */
     if (count && gpsp_storage_config_set(settings, count))
         s_saved = now;
+}
+
+bool gpsp_settings_display_available(void)
+{
+    enum gpsp_display_filter filter;
+    enum gpsp_display_color color;
+
+    return gpsp_board_display_options(&filter, &color);
+}
+
+enum gpsp_display_filter gpsp_settings_display_filter(void)
+{
+    enum gpsp_display_filter filter;
+    enum gpsp_display_color color;
+
+    gpsp_board_display_options(&filter, &color);
+    return filter;
+}
+
+enum gpsp_display_color gpsp_settings_display_color(void)
+{
+    enum gpsp_display_filter filter;
+    enum gpsp_display_color color;
+
+    gpsp_board_display_options(&filter, &color);
+    return color;
+}
+
+void gpsp_settings_set_display(enum gpsp_display_filter filter,
+        enum gpsp_display_color color)
+{
+    gpsp_board_set_display_options(filter, color);
 }
 
 int gpsp_settings_frameskip(void)

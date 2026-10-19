@@ -1,0 +1,8 @@
+# Copyright (C) 2026 Midworld Kim
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+rsource "../../../main/Kconfig.projbuild"
+
+config DSI_CHECK_MODEL
+    bool "Use test-only display and PPA model"
+    default n
