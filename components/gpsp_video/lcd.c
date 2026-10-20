@@ -604,6 +604,17 @@ uint16_t *gpsp_lcd_next_buffer(void)
     return index >= 0 ? s_buffers[index] : NULL;
 }
 
+void gpsp_lcd_release_buffer(uint16_t *pixels)
+{
+    if (!s_task || !pixels)
+        return;
+    portENTER_CRITICAL(&s_lock);
+    for (int i = 0; i < LCD_BUFFERS; i++)
+        if (s_buffers[i] == pixels && s_state[i] == LCD_BUFFER_WRITING)
+            s_state[i] = LCD_BUFFER_FREE;
+    portEXIT_CRITICAL(&s_lock);
+}
+
 void gpsp_lcd_frameskip(int frameskip)
 {
     s_frameskip = frameskip;
@@ -879,6 +890,11 @@ bool gpsp_lcd_present(const uint16_t *pixels, unsigned width,
 uint16_t *gpsp_lcd_next_buffer(void)
 {
     return NULL;
+}
+
+void gpsp_lcd_release_buffer(uint16_t *pixels)
+{
+    (void)pixels;
 }
 
 void gpsp_lcd_frameskip(int frameskip)

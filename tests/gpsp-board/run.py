@@ -4,6 +4,7 @@
 
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -76,6 +77,38 @@ def compile_test(build, source, config):
     return command
 
 
+def source_block(text, start):
+    first = text.index(start)
+    opening = text.index("{", first)
+    depth = 0
+    tokens = (r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|'
+              r"'(?:\\.|[^'\\])*'|[{}]")
+    for token in re.finditer(tokens, text[opening:], re.DOTALL):
+        if token[0] == "{":
+            depth += 1
+        elif token[0] == "}":
+            depth -= 1
+            if not depth:
+                return text[first:opening + token.end()] + "\n"
+    raise ValueError(f"Unclosed source block: {start}")
+
+
+def video_sources(build):
+    build.mkdir(parents=True)
+    frontend = (ROOT / "main/gpsp_frontend.c").read_text()
+    lcd = (ROOT / "components/gpsp_video/lcd.c").read_text()
+    # Compile the production callbacks and queue operations with a stopped worker.
+    (build / "video_callbacks.inc").write_text("\n".join(
+        source_block(frontend, name) for name in (
+            "static void gpsp_unload_game(", "static void gpsp_video_refresh(")))
+    (build / "lcd_buffer_state.inc").write_text(
+        source_block(lcd, "enum lcd_buffer_state") + ";\n")
+    (build / "lcd_buffers.inc").write_text("\n".join(
+        source_block(lcd, name) for name in (
+            "static int gpsp_lcd_find(", "bool gpsp_lcd_present(",
+            "uint16_t *gpsp_lcd_next_buffer(", "void gpsp_lcd_release_buffer(")))
+
+
 with tempfile.TemporaryDirectory(prefix="gpsp-board-") as folder:
     build = Path(folder) / "board"
     command = compile_test(build, "test_board.c", None)
@@ -87,3 +120,11 @@ with tempfile.TemporaryDirectory(prefix="gpsp-board-") as folder:
     subprocess.run(compile_test(build, "test_menu.c", ESPEMU_MENU_CONFIG),
                    check=True)
     subprocess.run([str(build / "test")], check=True)
+
+    build = Path(folder) / "video-buffers"
+    video_sources(build)
+    for benchmark in (0, 1):
+        command = compile_test(build, "test_video.c", None)
+        subprocess.run(command + [f"-DCONFIG_GPSP_BENCHMARK={benchmark}",
+                                  "-fsanitize=address,undefined"], check=True)
+        subprocess.run([str(build / "test")], check=True)

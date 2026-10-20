@@ -158,6 +158,15 @@ uint16_t *gpsp_board_video_buffer(void)
 #endif
 }
 
+void gpsp_board_video_release(uint16_t *pixels)
+{
+#if CONFIG_GPSP_LCD
+    gpsp_lcd_release_buffer(pixels);
+#else
+    (void)pixels;
+#endif
+}
+
 void gpsp_board_video_frameskip(int frameskip)
 {
 #if CONFIG_GPSP_LCD

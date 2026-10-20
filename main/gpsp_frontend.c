@@ -1183,12 +1183,14 @@ static uint16_t *s_core_screen;
 static const uint16_t *s_last_frame;
 static size_t s_last_pitch;
 
-/* The core frees its frame buffer at unload; give it its own one back. */
+/* Return the unused board buffer before the core frees its own one. */
 static void gpsp_unload_game(void)
 {
     if (s_core_screen)
     {
-        gpsp_screen_set_buffer(s_core_screen);
+        uint16_t *previous = gpsp_screen_set_buffer(s_core_screen);
+
+        gpsp_board_video_release(previous);
         s_core_screen = NULL;
     }
     retro_unload_game();
@@ -1218,6 +1220,9 @@ static void gpsp_video_refresh(
         if (!s_core_screen)
             s_core_screen = previous;
     }
+    else if (s_core_screen)
+        /* A submitted buffer may already be in use by the display. */
+        gpsp_screen_set_buffer(s_core_screen);
     s_frame_count++;
 #if CONFIG_GPSP_BENCHMARK
     s_benchmark_pixels = data;

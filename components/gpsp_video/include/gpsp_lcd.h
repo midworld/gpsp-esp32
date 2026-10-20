@@ -28,9 +28,12 @@ bool gpsp_lcd_present(const uint16_t *pixels, unsigned width,
  * Claim a free buffer for the core to render the next frame into. Pass it
  * back through gpsp_lcd_present() to show it without a copy.
  *
- * @return A GPSP_SCREEN_BUFFER_BYTES buffer, or NULL without a panel.
+ * @return A GPSP_SCREEN_BUFFER_BYTES buffer, or NULL if none is free.
  */
 uint16_t *gpsp_lcd_next_buffer(void);
+
+/** Return an unsubmitted buffer; queued, sending and UI-held frames stay owned. */
+void gpsp_lcd_release_buffer(uint16_t *pixels);
 
 /** Set frameskip for FPS warning colors: 0 for off, below 0 for auto. */
 void gpsp_lcd_frameskip(int frameskip);

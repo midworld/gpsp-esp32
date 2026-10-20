@@ -628,6 +628,33 @@ static void check_copy_failure(uint16_t *input)
 #endif
 #endif
 
+static void check_render_buffer_release(void)
+{
+    for (unsigned game = 0; game < 8; game++)
+    {
+        uint16_t *shown = gpsp_lcd_next_buffer();
+        uint16_t *unused = gpsp_lcd_next_buffer();
+        uint16_t *ui;
+        const uint16_t *frame;
+        assert(shown && unused && shown != unused);
+        fill(shown, 240, 160);
+        assert(gpsp_lcd_present(shown, 240, 160, 240 * 2));
+        assert(gpsp_lcd_ui_begin(&ui, &frame));
+        assert(frame == shown);
+        /* Unload returns the next frame that the old game never submitted. */
+        gpsp_lcd_release_buffer(unused);
+        gpsp_lcd_release_buffer(shown);
+        uint16_t *a = gpsp_lcd_next_buffer();
+        uint16_t *b = gpsp_lcd_next_buffer();
+        assert(a && b && a != b && a != frame && b != frame);
+        assert(!gpsp_lcd_next_buffer());
+        gpsp_lcd_release_buffer(a);
+        gpsp_lcd_release_buffer(b);
+        gpsp_lcd_ui_end();
+    }
+    puts("DSI_CHECK game switch render buffers pass");
+}
+
 static void display_check(void *arg)
 {
     (void)arg;
@@ -681,6 +708,7 @@ static void display_check(void *arg)
     i2c_master_bus_handle_t shared_bus;
     ESP_ERROR_CHECK(gpsp_i2c_acquire(&shared_bus));
     ESP_ERROR_CHECK(gpsp_lcd_init());
+    check_render_buffer_release();
     uint16_t *claimed = gpsp_lcd_next_buffer();
     assert(claimed);
     fill(claimed, 240, 160);

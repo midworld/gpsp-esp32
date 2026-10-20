@@ -60,9 +60,12 @@ bool gpsp_board_video_present(
  * Return a buffer for the core to render the next frame into, so that the
  * backend can show it without a copy.
  *
- * @return A GPSP_SCREEN_BUFFER_BYTES buffer, or NULL to keep the current one.
+ * @return A GPSP_SCREEN_BUFFER_BYTES buffer, or NULL to use the core's buffer.
  */
 uint16_t *gpsp_board_video_buffer(void);
+
+/* Return an unsubmitted render buffer; queued and UI-held frames stay owned. */
+void gpsp_board_video_release(uint16_t *pixels);
 
 /**
  * Set the frameskip used for FPS warning colors.
