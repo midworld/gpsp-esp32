@@ -276,6 +276,14 @@ void gpsp_dsi_status(void)
 esp_err_t gpsp_dsi_blend_overlay(uint16_t *frame, const uint32_t *foreground,
         unsigned width, unsigned height, unsigned x, unsigned y)
 {
+    return gpsp_dsi_blend_overlay_alpha(frame, foreground, width, height, x, y, 100);
+}
+
+esp_err_t gpsp_dsi_blend_overlay_alpha(uint16_t *frame, const uint32_t *foreground,
+        unsigned width, unsigned height, unsigned x, unsigned y, unsigned opacity)
+{
+    if (!opacity || opacity > 100)
+        return ESP_ERR_INVALID_ARG;
     const ppa_blend_oper_config_t operation = {
         .in_bg = {
             .buffer = frame,
@@ -298,7 +306,8 @@ esp_err_t gpsp_dsi_blend_overlay(uint16_t *frame, const uint32_t *foreground,
         },
         .bg_alpha_update_mode = PPA_ALPHA_FIX_VALUE,
         .bg_alpha_fix_val = 255,
-        .fg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
+        .fg_alpha_update_mode = opacity == 100 ? PPA_ALPHA_NO_CHANGE : PPA_ALPHA_SCALE,
+        .fg_alpha_scale_ratio = (float)opacity / 100.0f,
         .mode = PPA_TRANS_MODE_BLOCKING,
     };
 

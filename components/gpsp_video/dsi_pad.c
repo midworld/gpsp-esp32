@@ -6,18 +6,22 @@
 
 #include "sdkconfig.h"
 #if CONFIG_GPSP_LCD && CONFIG_GPSP_LCD_DSI
+#include <stdatomic.h>
 #include <string.h>
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "gpsp_font.h"
+#include "gpsp_lcd.h"
+#include "gpsp_lcd_dsi.h"
 #include "gpsp_virtual_pad.h"
 #include "libretro.h"
 #include "dsi_pad.h"
 #include "dsi_overlay.h"
 
 #define BUTTON(name) (1u << RETRO_DEVICE_ID_JOYPAD_##name)
+static atomic_uint s_opacity = 25;
 static uint32_t *s_tiles[GPSP_PAD_REGIONS];
 static uint32_t *s_art[GPSP_PAD_REGIONS][2];
 static uint32_t s_masks[GPSP_PAD_REGIONS];
@@ -200,6 +204,7 @@ esp_err_t gpsp_dsi_pad_draw(uint16_t *frame, uint32_t state)
 {
     if (!(state & GPSP_VIRTUAL_PAD_VISIBLE))
         return ESP_OK;
+    unsigned opacity = gpsp_dsi_pad_opacity();
     if (!s_tiles[0])
     {
         esp_err_t result = pad_prepare();
@@ -237,8 +242,8 @@ esp_err_t gpsp_dsi_pad_draw(uint16_t *frame, uint32_t state)
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
         int64_t start = esp_timer_get_time();
 #endif
-        esp_err_t result = gpsp_dsi_blend_overlay(frame, s_tiles[region],
-                r->height, r->width, x, y);
+        esp_err_t result = gpsp_dsi_blend_overlay_alpha(frame, s_tiles[region],
+                r->height, r->width, x, y, opacity);
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
         blend_us += esp_timer_get_time() - start;
 #endif
@@ -256,6 +261,19 @@ esp_err_t gpsp_dsi_pad_draw(uint16_t *frame, uint32_t state)
     portEXIT_CRITICAL(&s_lock);
 #endif
     return ESP_OK;
+}
+
+unsigned gpsp_dsi_pad_opacity(void)
+{
+    return atomic_load_explicit(&s_opacity, memory_order_relaxed);
+}
+
+void gpsp_dsi_set_pad_opacity(unsigned percent)
+{
+    if (percent != 25 && percent != 50 && percent != 100)
+        return;
+    if (atomic_exchange_explicit(&s_opacity, percent, memory_order_relaxed) != percent)
+        gpsp_lcd_overlay_changed();
 }
 
 void gpsp_dsi_pad_status(void)

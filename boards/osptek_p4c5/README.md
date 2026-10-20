@@ -26,6 +26,7 @@
   D-pad, A/B, L/R, Start, Select, and Menu also operate the existing menus.
   Physical control mappings do not change the touch button functions.
 - Controls use cached PSRAM tiles and PPA blending before Stats.
+  Pad Opacity: 25% (default), 50%, or 100%, applied by PPA.
   Normal/pressed artwork and working tiles use 1.37 MiB on first use.
   The touch worker uses a 3 KiB stack; there are no new SRAM framebuffers.
   DSI diagnostics include blend and cache-build times under `PAD profile`.

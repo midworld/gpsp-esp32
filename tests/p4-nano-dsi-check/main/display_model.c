@@ -382,7 +382,8 @@ esp_err_t __wrap_ppa_do_blend(ppa_client_handle_t handle,
             op->out.blend_cm == PPA_BLEND_COLOR_MODE_RGB565);
     assert(op->bg_alpha_update_mode == PPA_ALPHA_FIX_VALUE &&
             op->bg_alpha_fix_val == 255 &&
-            op->fg_alpha_update_mode == PPA_ALPHA_NO_CHANGE);
+            (op->fg_alpha_update_mode == PPA_ALPHA_NO_CHANGE ||
+                    op->fg_alpha_update_mode == PPA_ALPHA_SCALE));
     assert(op->mode == PPA_TRANS_MODE_BLOCKING);
     const uint16_t *bg = op->in_bg.buffer;
     const uint32_t *fg = op->in_fg.buffer;
@@ -396,6 +397,8 @@ esp_err_t __wrap_ppa_do_blend(ppa_client_handle_t handle,
             uint32_t f = fg[(y + op->in_fg.block_offset_y) * op->in_fg.pic_w +
                     x + op->in_fg.block_offset_x];
             unsigned alpha = f >> 24;
+            if (op->fg_alpha_update_mode == PPA_ALPHA_SCALE)
+                alpha = (unsigned)(alpha * op->fg_alpha_scale_ratio);
             unsigned r = ((f >> 16 & 255) * alpha +
                     (b >> 11) * 255 / 31 * (255 - alpha) + 127) / 255;
             unsigned g = ((f >> 8 & 255) * alpha +

@@ -89,8 +89,8 @@ static void check_buttons(void)
     gpsp_virtual_pad_update(&pad, points, 50);
     assert(!pad.buttons);
     empty(&pad, 60);
-    points[0] = (struct gpsp_touch_contact){0, 26, true};
-    points[1] = (struct gpsp_touch_contact){799, 77, true};
+    points[0] = (struct gpsp_touch_contact){0, 0, true};
+    points[1] = (struct gpsp_touch_contact){799, 51, true};
     points[2] = (struct gpsp_touch_contact){400, 50, true};
     points[3] = (struct gpsp_touch_contact){700, 180, true};
     gpsp_virtual_pad_update(&pad, points, 70);

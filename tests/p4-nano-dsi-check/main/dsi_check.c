@@ -157,6 +157,8 @@ static void check_virtual_pad(uint16_t *input, uint16_t *ui)
 {
     uint16_t *baseline = heap_caps_malloc(DSI_BYTES, MALLOC_CAP_SPIRAM);
     assert(baseline);
+    for (unsigned i = 0; i < 320 * 240; i++)
+        ui[i] = (uint16_t)(i * 7919);
     gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_OFF);
     gpsp_dsi_set_options(GPSP_DISPLAY_NEAREST, GPSP_DISPLAY_COLOR_NONE);
     for (unsigned mode = 0; mode < 2; mode++)
@@ -167,11 +169,12 @@ static void check_virtual_pad(uint16_t *input, uint16_t *ui)
         ESP_ERROR_CHECK(gpsp_dsi_draw(source, is_ui));
         memcpy(baseline, last_frame(), DSI_BYTES);
         s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE;
-        for (unsigned held = 0; held < 2; held++)
+        const uint32_t masks[] = {0,
+            (1u << RETRO_DEVICE_ID_JOYPAD_UP) | (1u << RETRO_DEVICE_ID_JOYPAD_A),
+            (1u << RETRO_DEVICE_ID_JOYPAD_DOWN) | (1u << RETRO_DEVICE_ID_JOYPAD_B)};
+        for (unsigned held = 0; held < 3; held++)
         {
-            s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE | (held ?
-                    (1u << RETRO_DEVICE_ID_JOYPAD_UP) |
-                    (1u << RETRO_DEVICE_ID_JOYPAD_A) : 0);
+            s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE | masks[held];
             ESP_ERROR_CHECK(gpsp_dsi_draw(source, is_ui));
             const uint16_t *shown = last_frame();
             assert(landscape_pixel(shown, 0, 346) != 0);
@@ -189,6 +192,31 @@ static void check_virtual_pad(uint16_t *input, uint16_t *ui)
             assert(memcmp(baseline, last_frame(), DSI_BYTES) == 0);
         }
     }
+    /* Direct frame checks run without the UI worker's asynchronous redraws. */
+    gpsp_lcd_ui_end();
+    const unsigned opacities[] = {25, 50, 100};
+    unsigned levels[3];
+    s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE;
+    for (unsigned i = 0; i < 3; i++)
+    {
+        gpsp_dsi_set_pad_opacity(opacities[i]);
+        ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+        levels[i] = landscape_pixel(last_frame(), 0, 346);
+        assert(landscape_pixel(last_frame(), 0, 0) != 0);
+        assert(landscape_pixel(last_frame(), 799, 0) != 0);
+    }
+    assert(levels[0] && levels[0] < levels[1] && levels[1] < levels[2]);
+    uint16_t top = landscape_pixel(last_frame(), 100, 0);
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_FULL);
+    ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+    assert(landscape_pixel(last_frame(), 100, 0) < top);
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_OFF);
+    gpsp_dsi_set_pad_opacity(37);
+    assert(gpsp_dsi_pad_opacity() == 100);
+    gpsp_dsi_set_pad_opacity(25);
+    s_test_touch = 0;
+    const uint16_t *held_frame;
+    assert(gpsp_lcd_ui_begin(&ui, &held_frame));
     /* A static menu still refreshes controls without editing its canvas. */
     gpsp_lcd_ui_draw(0, 240);
     memcpy(baseline, last_frame(), DSI_BYTES);
@@ -229,6 +257,7 @@ static void check_virtual_pad(uint16_t *input, uint16_t *ui)
             idle[98], idle[99], changing[49], changing[94], changing[98], changing[99]);
     heap_caps_free(baseline);
     puts("DSI_CHECK virtual pad: game/UI bounds, border cleanup, idle UI refresh pass");
+    puts("DSI_CHECK pad opacity: 25/50/100, top edges, Stats on top pass");
 }
 
 static void check_stats(uint16_t *input, uint16_t *ui)

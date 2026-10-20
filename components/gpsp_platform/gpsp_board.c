@@ -269,6 +269,24 @@ void gpsp_board_set_virtual_pad(bool enabled)
 #endif
 }
 
+unsigned gpsp_board_virtual_pad_opacity(void)
+{
+#if CONFIG_GPSP_LCD_DSI
+    return gpsp_dsi_pad_opacity();
+#else
+    return 25;
+#endif
+}
+
+void gpsp_board_set_virtual_pad_opacity(unsigned percent)
+{
+#if CONFIG_GPSP_LCD_DSI
+    gpsp_dsi_set_pad_opacity(percent);
+#else
+    (void)percent;
+#endif
+}
+
 #if CONFIG_GPSP_MENU && CONFIG_ESPEMU
 bool gpsp_board_ui_begin(uint16_t **pixels, const uint16_t **frame)
 {

@@ -11,9 +11,9 @@
 #define BUTTON(name) (1u << RETRO_DEVICE_ID_JOYPAD_##name)
 
 const struct gpsp_pad_rect gpsp_pad_rects[GPSP_PAD_REGIONS] = {
-    [GPSP_PAD_SELECT] = {0, 26, 144, 52},
-    [GPSP_PAD_START] = {656, 26, 144, 52},
-    [GPSP_PAD_HOME] = {358, 26, 84, 52},
+    [GPSP_PAD_SELECT] = {0, 0, 144, 52},
+    [GPSP_PAD_START] = {656, 0, 144, 52},
+    [GPSP_PAD_HOME] = {358, 0, 84, 52},
     [GPSP_PAD_L] = {0, 150, 144, 64},
     [GPSP_PAD_R] = {656, 150, 144, 64},
     [GPSP_PAD_DPAD] = {0, 238, 216, 216},

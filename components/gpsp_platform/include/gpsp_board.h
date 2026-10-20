@@ -96,6 +96,8 @@ uint32_t gpsp_board_virtual_input(void);
 bool gpsp_board_virtual_pad_available(void);
 bool gpsp_board_virtual_pad_enabled(void);
 void gpsp_board_set_virtual_pad(bool enabled);
+unsigned gpsp_board_virtual_pad_opacity(void);
+void gpsp_board_set_virtual_pad_opacity(unsigned percent);
 
 #if CONFIG_GPSP_MENU
 /* Full-screen UI while the game is paused. */

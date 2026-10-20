@@ -16,6 +16,7 @@
  *   display_color=none|gba      DSI game output only
  *   display_stats=off|simple|full  DSI game statistics overlay
  *   virtual_pad=off|on          touch controls, double-tap to enable
+ *   virtual_pad_opacity=25|50|100  touch overlay alpha multiplier, percent
  *   last_rom=<name>             the ROM last started, for the game list
  *   wifi_ssid=<name>            the Wi-Fi network the menu joins
  *   wifi_password=<text>        its password, as plain text
@@ -66,6 +67,7 @@ struct gpsp_settings
     enum gpsp_display_color display_color;
     enum gpsp_display_stats display_stats;
     bool virtual_pad;
+    unsigned virtual_pad_opacity;
 };
 
 static const char *const s_filter_keys[GPSP_DISPLAY_FILTER_COUNT] = {
@@ -178,6 +180,7 @@ static void gpsp_settings_current(struct gpsp_settings *settings)
             &settings->display_color);
     settings->display_stats = gpsp_board_stats();
     settings->virtual_pad = gpsp_board_virtual_pad_enabled();
+    settings->virtual_pad_opacity = gpsp_board_virtual_pad_opacity();
 }
 
 /* Parse a button name; leave the value unchanged for unknown names. */
@@ -306,6 +309,12 @@ void gpsp_settings_load(void)
     bool virtual_pad = false;
     gpsp_settings_switch("virtual_pad", &virtual_pad);
     gpsp_board_set_virtual_pad(virtual_pad);
+    unsigned opacity = 25;
+    if (gpsp_storage_config("virtual_pad_opacity", value, sizeof(value)) &&
+            gpsp_settings_number(value, 25, 100, &number) &&
+            (number == 25 || number == 50 || number == 100))
+        opacity = number;
+    gpsp_board_set_virtual_pad_opacity(opacity);
 
     gpsp_settings_current(&s_saved);
     ESP_LOGI(TAG, "Settings: frameskip=%d threshold=%u%% volume=%d mute=%d slot=%d "
@@ -317,7 +326,8 @@ void gpsp_settings_load(void)
 
 void gpsp_settings_save(void)
 {
-    struct gpsp_storage_setting settings[14 + GPSP_SETTINGS_CONTROL_COUNT];
+    struct gpsp_storage_setting settings[15 + GPSP_SETTINGS_CONTROL_COUNT];
+    char opacity[4];
     char controls[GPSP_SETTINGS_CONTROL_COUNT][8];
     char speed[4];
     char frameskip[8];
@@ -407,6 +417,12 @@ void gpsp_settings_save(void)
     if (gpsp_board_virtual_pad_available() && now.virtual_pad != s_saved.virtual_pad)
         settings[count++] = (struct gpsp_storage_setting){
             "virtual_pad", now.virtual_pad ? "on" : "off" };
+    if (gpsp_board_virtual_pad_available() &&
+            now.virtual_pad_opacity != s_saved.virtual_pad_opacity)
+    {
+        snprintf(opacity, sizeof(opacity), "%u", now.virtual_pad_opacity);
+        settings[count++] = (struct gpsp_storage_setting){ "virtual_pad_opacity", opacity };
+    }
 
     /* Without a card the settings last until power off. */
     if (count && gpsp_storage_config_set(settings, count))

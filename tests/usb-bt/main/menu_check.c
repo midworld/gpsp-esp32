@@ -37,6 +37,8 @@ void gpsp_board_set_stats(enum gpsp_display_stats mode) { (void)mode; }
 bool gpsp_board_virtual_pad_available(void) { return false; }
 bool gpsp_board_virtual_pad_enabled(void) { return false; }
 void gpsp_board_set_virtual_pad(bool enabled) { (void)enabled; }
+unsigned gpsp_board_virtual_pad_opacity(void) { return 25; }
+void gpsp_board_set_virtual_pad_opacity(unsigned percent) { (void)percent; }
 void gpsp_board_ui_draw(unsigned y0, unsigned y1) { (void)y0; (void)y1; }
 int gpsp_state_slot(void) { return slot; }
 void gpsp_state_select(int value) { slot = value; }

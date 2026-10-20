@@ -114,6 +114,7 @@ enum menu_item
     MENU_ITEM_COLOR,
     MENU_ITEM_STATS,
     MENU_ITEM_VIRTUAL_PAD,
+    MENU_ITEM_PAD_OPACITY,
     MENU_ITEM_AUTO_SAVE,
     MENU_ITEM_AUTO_LOAD,
     MENU_ITEM_CONTROLS,
@@ -163,6 +164,7 @@ static const char *const s_item_names[MENU_ITEM_COUNT] = {
     [MENU_ITEM_COLOR] = "Colors",
     [MENU_ITEM_STATS] = "Stats",
     [MENU_ITEM_VIRTUAL_PAD] = "Virtual Pad",
+    [MENU_ITEM_PAD_OPACITY] = "Pad Opacity",
     [MENU_ITEM_AUTO_SAVE] = "Auto Save",
     [MENU_ITEM_AUTO_LOAD] = "Auto Load",
     [MENU_ITEM_TRANSFER] = "File Transfer",
@@ -346,6 +348,8 @@ static bool menu_item_value(enum menu_item item, char *value, size_t size)
     }
     else if (item == MENU_ITEM_VIRTUAL_PAD)
         snprintf(value, size, gpsp_board_virtual_pad_enabled() ? "< On >" : "< Off >");
+    else if (item == MENU_ITEM_PAD_OPACITY)
+        snprintf(value, size, "< %u%% >", gpsp_board_virtual_pad_opacity());
     else if (item == MENU_ITEM_COLOR)
         snprintf(value, size, gpsp_settings_display_color() ==
                 GPSP_DISPLAY_COLOR_GBA ? "< GBA LCD >" : "< None >");
@@ -564,7 +568,8 @@ static void menu_build_items(void)
                 (i != MENU_ITEM_BT || bt.state != GPSP_BT_DISABLED) &&
                 ((i != MENU_ITEM_DISPLAY && i != MENU_ITEM_COLOR &&
                         i != MENU_ITEM_STATS) || display) &&
-                (i != MENU_ITEM_VIRTUAL_PAD || gpsp_board_virtual_pad_available()) &&
+                ((i != MENU_ITEM_VIRTUAL_PAD && i != MENU_ITEM_PAD_OPACITY) ||
+                        gpsp_board_virtual_pad_available()) &&
                 (i != MENU_ITEM_THRESHOLD || automatic) &&
                 (i != MENU_ITEM_GAME_LIST || s_game_list) &&
                 (i != MENU_ITEM_TRANSFER || s_card) &&
@@ -653,6 +658,15 @@ static void menu_direction(uint32_t buttons)
     }
     else if (s_items[s_cursor] == MENU_ITEM_VIRTUAL_PAD)
         gpsp_board_set_virtual_pad(!gpsp_board_virtual_pad_enabled());
+    else if (s_items[s_cursor] == MENU_ITEM_PAD_OPACITY)
+    {
+        unsigned opacity = gpsp_board_virtual_pad_opacity();
+        if (buttons & MENU_BUTTON(RIGHT))
+            opacity = opacity == 25 ? 50 : opacity == 50 ? 100 : 25;
+        else
+            opacity = opacity == 100 ? 50 : opacity == 50 ? 25 : 100;
+        gpsp_board_set_virtual_pad_opacity(opacity);
+    }
     else if (s_items[s_cursor] == MENU_ITEM_COLOR)
         gpsp_settings_set_display(gpsp_settings_display_filter(),
                 gpsp_settings_display_color() == GPSP_DISPLAY_COLOR_NONE ?

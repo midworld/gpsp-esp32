@@ -22,6 +22,8 @@ void gpsp_dsi_set_options(enum gpsp_display_filter filter,
         enum gpsp_display_color color);
 enum gpsp_display_stats gpsp_dsi_stats_mode(void);
 void gpsp_dsi_set_stats(enum gpsp_display_stats mode);
+unsigned gpsp_dsi_pad_opacity(void);
+void gpsp_dsi_set_pad_opacity(unsigned percent);
 void gpsp_dsi_status(void);
 
 #endif
