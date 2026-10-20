@@ -394,6 +394,22 @@ menu "gpSP USB gamepad"
             Log report counts, report age, endpoint errors and client task
             delays every 5 seconds. Quiet devices are not treated as lost.
 
+    config GPSP_USB_BT
+        bool "Use USB Bluetooth HCI adapters"
+        depends on GPSP_USB_PAD
+        select BT_ENABLED
+        select BT_CLASSIC_ENABLED
+        select BT_HID_ENABLED
+        select BT_HID_HOST_ENABLED
+        select BT_SDP_COMMON_ENABLED
+        select BT_ALLOCATION_FROM_SPIRAM_FIRST
+        select BT_BLE_DYNAMIC_ENV_MEMORY
+        default n
+        help
+            Start the ESP-IDF Bluedroid host only when a standard USB HCI
+            adapter is found. Release its tasks and buffers on removal.
+            Use the Bluedroid host with the controller disabled.
+
     config GPSP_USB_PAD_HID_DUMP
         bool "Log raw reports of other HID devices"
         depends on GPSP_USB_PAD

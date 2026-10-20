@@ -5,6 +5,7 @@
  */
 
 #include "gpsp_usb_pad.h"
+#include "usb_bt.h"
 
 #include "sdkconfig.h"
 
@@ -631,6 +632,15 @@ static void pad_open(uint8_t addr)
     if (result != ESP_OK)
         goto fail;
 
+    if (gpsp_usb_bt_match(dev_desc, config))
+    {
+        ESP_LOGI(TAG, "USB Bluetooth adapter %04x:%04x addr=%u",
+                s_pad.vid, s_pad.pid, addr);
+        pad_close();
+        gpsp_usb_bt_attach(addr);
+        return;
+    }
+
     s_pad.proto = pad_find_interface(dev_desc, config, &intf, &in, &out);
     if (s_pad.proto == PAD_PROTO_NONE)
     {
@@ -811,6 +821,7 @@ static void pad_client_task(void *arg)
     {
         /* Transfer callbacks also run inside this call. */
         usb_host_client_handle_events(s_client, pdMS_TO_TICKS(10));
+        gpsp_usb_bt_poll();
 
         /* Close only after the pending transfers have returned. */
         if (s_pad.dev && s_pad.gone && !s_pad.in_busy && !s_pad.out_busy)
@@ -842,6 +853,7 @@ static void pad_client_task(void *arg)
 #endif
     }
 
+    gpsp_usb_bt_shutdown();
     if (s_pad.dev)
     {
         pad_cancel();

@@ -16,13 +16,14 @@ else()
 
     idf_component_register(
         SRCS "audio_es8311.c" "i2c_bus.c" "network.c" "usb_pad.c" "sdmmc.c"
+            "usb_bt.c" "usb_bt_packet.c"
             "$ENV{GPSP_BOARD_DIR}/board.c"
         INCLUDE_DIRS "include"
         REQUIRED_IDF_TARGETS esp32p4
         REQUIRES esp_driver_i2c
         PRIV_REQUIRES esp_driver_gpio esp_driver_spi esp_driver_i2s
             esp_eth esp_event esp_mm esp_psram esp_timer esp_netif esp_wifi
-            gpsp mbedtls nvs_flash fatfs sdmmc esp_driver_sdmmc
+            gpsp bt mbedtls nvs_flash fatfs sdmmc esp_driver_sdmmc
             ${gpsp_hosted_component} ${gpsp_wifi_remote_component} ${gpsp_usb_component}
     )
     if(CONFIG_GPSP_USB_PAD_DIAGNOSTICS)

@@ -101,3 +101,11 @@ if((GPSP_BOARD STREQUAL "espemu" AND NOT CONFIG_ESPEMU) OR
         (NOT GPSP_BOARD STREQUAL "espemu" AND CONFIG_ESPEMU))
     message(FATAL_ERROR "GPSP_BOARD and CONFIG_ESPEMU disagree")
 endif()
+if(CONFIG_GPSP_USB_BT)
+    # ESP-IDF 6.1 Bluedroid trips GCC string truncation checks.
+    idf_component_get_property(gpsp_bt_lib bt COMPONENT_LIB)
+    target_compile_options(${gpsp_bt_lib} PRIVATE -Wno-error=stringop-truncation)
+    # Skip the optional packet type and duplicate link policy setup after
+    # each link comes up; one adapter refused the packet type change.
+    target_compile_definitions(${gpsp_bt_lib} PRIVATE BTM_BYPASS_EXTRA_ACL_SETUP=1)
+endif()

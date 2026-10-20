@@ -1,4 +1,4 @@
-/* ESP32-P4-NANO USB gamepad input on the high-speed OTG port.
+/* ESP32-P4 USB gamepad input on the high-speed OTG port.
  *
  * Copyright (C) 2026 Midworld Kim
  * SPDX-License-Identifier: GPL-3.0-or-later

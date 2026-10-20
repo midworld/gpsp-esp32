@@ -23,6 +23,7 @@
 - Asterix state 0 measurements: [integer scaling](../../docs/benchmark.md#asterix-state-0).
 - Touch and camera input are not implemented.
 - Ethernet is disabled; Wi-Fi uses the existing ESP-Hosted C5 firmware.
+- `CONFIG_GPSP_USB_BT` enables an external USB HCI host on demand.
 
 | Function | P4 GPIO |
 | --- | --- |
