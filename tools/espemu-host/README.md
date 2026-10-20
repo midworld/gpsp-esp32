@@ -140,6 +140,9 @@ build/espemu-host/gpsp-espemu-host 127.0.0.1 24680 profile.csv
 
 - The title reports F5/F8 success or failure. F8 never runs at boot.
 - Game controllers use the D-pad, A/B, shoulders, Start, and Back.
+- Face buttons match the board's RetroPad positions: A on the right, B below.
+- PS/Guide opens or closes the menu through the Home command.
+- `Host controller:` in the log identifies input forwarded from the computer.
 - Input repeats every 100 ms. Lost connections release held buttons.
 - Normal runs replace a waiting frame when the host falls behind. Benchmark
   runs use a larger frame queue.

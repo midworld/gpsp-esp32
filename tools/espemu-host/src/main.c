@@ -758,7 +758,14 @@ static SDL_GameController *gpsp_host_open_controller(void)
     for (joystick = 0; joystick < SDL_NumJoysticks(); joystick++)
     {
         if (SDL_IsGameController(joystick))
-            return SDL_GameControllerOpen(joystick);
+        {
+            SDL_GameController *controller = SDL_GameControllerOpen(joystick);
+
+            if (controller)
+                fprintf(stderr, "Host controller: %s (forwarded to gpSP)\n",
+                        SDL_GameControllerName(controller));
+            return controller;
+        }
     }
 
     return NULL;
@@ -803,7 +810,7 @@ static uint16_t gpsp_host_read_input(SDL_GameController *controller)
         return input;
 
     if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_B))
-        input |= GPSP_ESPEMU_INPUT_B;
+        input |= GPSP_ESPEMU_INPUT_A;
     if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_BACK))
         input |= GPSP_ESPEMU_INPUT_SELECT;
     if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START))
@@ -820,7 +827,7 @@ static uint16_t gpsp_host_read_input(SDL_GameController *controller)
             SDL_CONTROLLER_BUTTON_DPAD_RIGHT))
         input |= GPSP_ESPEMU_INPUT_RIGHT;
     if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A))
-        input |= GPSP_ESPEMU_INPUT_A;
+        input |= GPSP_ESPEMU_INPUT_B;
     if (SDL_GameControllerGetButton(controller,
             SDL_CONTROLLER_BUTTON_LEFTSHOULDER))
         input |= GPSP_ESPEMU_INPUT_L;
@@ -829,6 +836,19 @@ static uint16_t gpsp_host_read_input(SDL_GameController *controller)
         input |= GPSP_ESPEMU_INPUT_R;
 
     return input;
+}
+
+static void gpsp_host_poll_input(struct gpsp_host_state *state,
+        SDL_GameController *controller, bool *home_held)
+{
+    bool home = controller && SDL_GameControllerGetAttached(controller) &&
+            SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_GUIDE);
+
+    /* The wire button mask is 16 bits; Home uses the command field. */
+    if (home && !*home_held && SDL_AtomicGet(&state->connected))
+        gpsp_host_command(state, GPSP_ESPEMU_COMMAND_HOME);
+    *home_held = home;
+    SDL_AtomicSet(&state->input_bits, gpsp_host_read_input(controller));
 }
 
 static const uint8_t *gpsp_host_fps_glyph(char character)
@@ -1141,6 +1161,7 @@ int main(int argc, char **argv)
     SDL_Renderer *renderer = NULL;
     SDL_Texture *texture = NULL;
     SDL_GameController *controller = NULL;
+    bool home_held = false;
     SDL_Thread *network_thread = NULL;
     uint32_t displayed_sequence = UINT32_MAX;
     uint32_t displayed_connection = 0;
@@ -1358,7 +1379,7 @@ int main(int argc, char **argv)
             }
             else if (event.type == SDL_CONTROLLERDEVICEADDED && !controller)
             {
-                controller = SDL_GameControllerOpen(event.cdevice.which);
+                controller = gpsp_host_open_controller();
             }
             else if (event.type == SDL_CONTROLLERDEVICEREMOVED && controller &&
                     event.cdevice.which ==
@@ -1367,10 +1388,11 @@ int main(int argc, char **argv)
             {
                 SDL_GameControllerClose(controller);
                 controller = gpsp_host_open_controller();
+                home_held = false;
             }
         }
 
-        SDL_AtomicSet(&state.input_bits, gpsp_host_read_input(controller));
+        gpsp_host_poll_input(&state, controller, &home_held);
 
         SDL_LockMutex(state.frame_mutex);
 
