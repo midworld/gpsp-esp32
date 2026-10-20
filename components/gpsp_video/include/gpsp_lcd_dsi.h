@@ -14,6 +14,8 @@
 
 esp_err_t gpsp_dsi_init(void);
 esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui);
+esp_err_t gpsp_dsi_ui_update(const uint32_t *overlay);
+esp_err_t gpsp_dsi_ui_draw(const uint16_t *pixels, const uint16_t *background);
 esp_err_t gpsp_dsi_clear(void);
 void gpsp_dsi_shutdown(void);
 void gpsp_dsi_options(enum gpsp_display_filter *filter,

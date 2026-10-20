@@ -115,6 +115,8 @@ void gpsp_board_set_virtual_pad_opacity(unsigned percent);
  * @return false without a display.
  */
 bool gpsp_board_ui_begin(uint16_t **pixels, const uint16_t **frame);
+/* Optional ARGB menu layer; a non-NULL background starts a new backdrop. */
+uint32_t *gpsp_board_ui_layer(uint16_t *pixels, uint16_t **background);
 
 /**
  * Show rows y0 to y1 (exclusive) of the UI picture. Returns after the rows

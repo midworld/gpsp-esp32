@@ -51,6 +51,10 @@ void gpsp_board_ui_draw(unsigned y0, unsigned y1)
 {
     gpsp_lcd_ui_draw(y0, y1);
 }
+uint32_t *gpsp_board_ui_layer(uint16_t *pixels, uint16_t **background)
+{
+    return gpsp_lcd_ui_layer(pixels, background);
+}
 int gpsp_state_slot(void) { return state_slot; }
 void gpsp_state_select(int slot) { state_slot = slot; }
 bool gpsp_state_used(int slot) { (void)slot; return false; }

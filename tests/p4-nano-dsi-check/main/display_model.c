@@ -38,6 +38,31 @@ static unsigned last_source_pixels;
 static unsigned last_core;
 static unsigned ppa_calls;
 static unsigned blend_calls;
+static unsigned fail_menu_alloc;
+
+void display_model_fail_menu_alloc(unsigned allocation)
+{
+    fail_menu_alloc = allocation;
+}
+
+static bool menu_alloc_failed(size_t bytes)
+{
+    return fail_menu_alloc &&
+            (bytes == 320 * 240 * 2 || bytes == 320 * 240 * 4 ||
+                    bytes == 480 * 640 * 4) && !--fail_menu_alloc;
+}
+
+void *__real_heap_caps_aligned_alloc(size_t alignment, size_t size, uint32_t caps);
+void *__wrap_heap_caps_aligned_alloc(size_t alignment, size_t size, uint32_t caps)
+{
+    return menu_alloc_failed(size) ? NULL : __real_heap_caps_aligned_alloc(alignment, size, caps);
+}
+
+void *__real_heap_caps_malloc(size_t size, uint32_t caps);
+void *__wrap_heap_caps_malloc(size_t size, uint32_t caps)
+{
+    return menu_alloc_failed(size) ? NULL : __real_heap_caps_malloc(size, caps);
+}
 
 unsigned display_model_blend_calls(void)
 {

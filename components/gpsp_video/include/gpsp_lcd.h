@@ -50,6 +50,9 @@ void gpsp_lcd_status(unsigned cpu0, unsigned cpu1, int temp_tenths,
  * @return false without a panel.
  */
 bool gpsp_lcd_ui_begin(uint16_t **pixels, const uint16_t **frame);
+#if CONFIG_GPSP_LCD_DSI
+uint32_t *gpsp_lcd_ui_layer(uint16_t *pixels, uint16_t **background);
+#endif
 
 /** Send rows y0 to y1 (exclusive) of the UI picture and wait for them. */
 void gpsp_lcd_ui_draw(unsigned y0, unsigned y1);

@@ -58,6 +58,7 @@ static unsigned s_next;
 static bool s_ready;
 static uint16_t *s_work;
 static uint16_t *s_color_lut;
+static uint32_t *s_ui_overlay;
 #if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
 #define DSI_TILE_ROWS CONFIG_GPSP_LCD_DSI_TILE_ROWS
 #define DSI_TILE_BYTES (DSI_WIDTH * DSI_TILE_ROWS * 3 * sizeof(uint16_t))
@@ -425,7 +426,47 @@ static esp_err_t dsi_present(void)
     return ESP_OK;
 }
 
+esp_err_t gpsp_dsi_ui_update(const uint32_t *overlay)
+{
+    if (!s_ui_overlay)
+        s_ui_overlay = heap_caps_aligned_alloc(64, 480 * 640 * sizeof(uint32_t),
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    if (!s_ui_overlay)
+        return ESP_ERR_NO_MEM;
+    /* Cache nearest 2x artwork; touch-only redraws reuse it unchanged. */
+    for (unsigned x = 0; x < 320; x++)
+        for (unsigned y = 0; y < 240; y++)
+        {
+#if CONFIG_GPSP_LCD_ROTATE_180
+            unsigned px = 239 - y, py = x;
+#else
+            unsigned px = y, py = 319 - x;
+#endif
+            uint64_t color = overlay[y * 320 + x];
+            color |= color << 32;
+            uint64_t *dest = (uint64_t *)(s_ui_overlay + py * 2 * 480 + px * 2);
+            dest[0] = dest[240] = color;
+        }
+    return ESP_OK;
+}
+
+static esp_err_t dsi_draw(const uint16_t *pixels, bool ui,
+        const uint32_t *overlay, uint32_t pad);
+
+esp_err_t gpsp_dsi_ui_draw(const uint16_t *pixels, const uint16_t *background)
+{
+    uint32_t pad = gpsp_touch_read();
+    const uint32_t *overlay = pad & GPSP_VIRTUAL_PAD_VISIBLE ? s_ui_overlay : NULL;
+    return dsi_draw(overlay ? background : pixels, true, overlay, pad);
+}
+
 esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
+{
+    return dsi_draw(pixels, ui, NULL, gpsp_touch_read());
+}
+
+static esp_err_t dsi_draw(const uint16_t *pixels, bool ui,
+        const uint32_t *overlay, uint32_t pad)
 {
     if (!s_ready || !pixels)
         return ESP_ERR_INVALID_STATE;
@@ -448,7 +489,6 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
     cpu_rotate = !ui && !bilinear && s_copy;
 #endif
     unsigned offset_y = (DSI_HEIGHT - width * scale) / 2;
-    uint32_t pad = gpsp_touch_read();
     enum gpsp_display_stats stats = ui ? GPSP_DISPLAY_STATS_OFF : gpsp_dsi_stats_mode();
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     bool sample = !ui && ((s_profile_frames++ & 15) == 0);
@@ -597,6 +637,9 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
         gpsp_touch_set_enabled(false);
         ESP_LOGW(TAG, "Virtual pad disabled: %s", esp_err_to_name(pad_result));
     }
+    if (overlay)
+        ESP_RETURN_ON_ERROR(gpsp_dsi_blend_overlay(s_frames[s_next], overlay,
+                480, 640, 0, 80), TAG, "UI layer blend");
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     int64_t pad_end = sample ? esp_timer_get_time() : 0;
 #endif
@@ -765,6 +808,8 @@ void gpsp_dsi_shutdown(void)
     s_ready = false;
     gpsp_dsi_hud_shutdown();
     gpsp_dsi_pad_shutdown();
+    heap_caps_free(s_ui_overlay);
+    s_ui_overlay = NULL;
 #if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
     dsi_copy_shutdown();
 #endif

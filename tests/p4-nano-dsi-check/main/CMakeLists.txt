@@ -26,6 +26,7 @@ idf_component_register(
 if(CONFIG_DSI_CHECK_MODEL)
     target_sources(${COMPONENT_LIB} PRIVATE "display_model.c")
     foreach(symbol IN ITEMS
+            heap_caps_aligned_alloc heap_caps_malloc
             esp_ldo_acquire_channel esp_ldo_release_channel
             i2c_new_master_bus i2c_del_master_bus
             i2c_master_bus_add_device i2c_master_bus_rm_device i2c_master_transmit

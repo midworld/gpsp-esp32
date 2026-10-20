@@ -11,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include "gpsp_lcd.h"
 #include "gpsp_i2c.h"
+#include "gpsp_ui.h"
 #include "libretro.h"
 /* Inspect output buffers without adding a firmware diagnostic API. */
 #include "../../../components/gpsp_video/dsi.c"
@@ -22,6 +23,7 @@ unsigned display_model_ppa_source_pixels(void);
 unsigned display_model_ppa_core(void);
 unsigned display_model_ppa_calls(void);
 unsigned display_model_blend_calls(void);
+void display_model_fail_menu_alloc(unsigned allocation);
 #if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
 void display_model_dma_fail_after(unsigned requests);
 void display_model_dma_check(void);
@@ -29,7 +31,15 @@ void display_model_dma_check(void);
 #endif
 void display_settings_check(uint16_t *ui);
 static uint32_t s_test_touch;
-uint32_t gpsp_touch_read(void) { return s_test_touch; }
+static bool s_test_toggle_touch;
+bool gpsp_touch_available(void) { return true; }
+uint32_t gpsp_touch_read(void)
+{
+    uint32_t state = s_test_touch;
+    if (s_test_toggle_touch)
+        s_test_touch ^= GPSP_VIRTUAL_PAD_VISIBLE;
+    return state;
+}
 void gpsp_touch_set_enabled(bool enabled)
 {
     s_test_touch = enabled ? GPSP_VIRTUAL_PAD_VISIBLE : 0;
@@ -258,6 +268,112 @@ static void check_virtual_pad(uint16_t *input, uint16_t *ui)
     heap_caps_free(baseline);
     puts("DSI_CHECK virtual pad: game/UI bounds, border cleanup, idle UI refresh pass");
     puts("DSI_CHECK pad opacity: 25/50/100, top edges, Stats on top pass");
+}
+
+#if CONFIG_DSI_CHECK_MODEL
+static void check_menu_allocations(uint16_t **ui)
+{
+    const uint16_t *held;
+    for (unsigned allocation = 1; allocation <= 4; allocation++)
+    {
+        size_t free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        display_model_fail_menu_alloc(allocation);
+        s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE;
+        gpsp_ui_backdrop(*ui, NULL);
+        gpsp_ui_panel(*ui);
+        gpsp_lcd_ui_draw(0, 240);
+        assert(!s_test_touch && !gpsp_lcd_ui_layer(*ui, NULL));
+        assert(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) == free);
+        unsigned next = s_next;
+        s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE;
+        gpsp_lcd_overlay_changed();
+        for (unsigned wait = 0; s_next == next && wait < 1000; wait++)
+            vTaskDelay(1);
+        assert(s_next != next && !s_test_touch);
+        assert(landscape_pixel(last_frame(), 0, 346) == 0);
+        gpsp_lcd_ui_end();
+        assert(gpsp_lcd_ui_begin(ui, &held));
+    }
+    puts("DSI_CHECK menu allocation failures: four stages, heap recovery, pad suppression pass");
+}
+#endif
+
+static void check_menu_layers(uint16_t *ui)
+{
+    uint16_t *below = heap_caps_malloc(DSI_BYTES, MALLOC_CAP_SPIRAM);
+    assert(below);
+    gpsp_dsi_set_pad_opacity(100);
+    gpsp_ui_backdrop(ui, NULL);
+    s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE;
+    gpsp_lcd_ui_draw(0, 240);
+    memcpy(below, last_frame(), DSI_BYTES);
+    gpsp_ui_panel(ui);
+    gpsp_ui_tint(ui, 24, 150, 80, 16, GPSP_UI_COLOR_CURSOR);
+    gpsp_ui_fill(ui, 270, 190, 12, 12, 0xf800);
+    gpsp_ui_text_clip(ui, 26, 160, "Overlay", 3, 80, 0xffff);
+    gpsp_lcd_ui_draw(0, 240);
+    const uint16_t *shown = last_frame();
+    const uint32_t *layer = gpsp_lcd_ui_layer(ui, NULL);
+    assert(layer);
+    unsigned through = 0, opaque = 0;
+    for (unsigned y = 0; y < 480; y++)
+        for (unsigned x = 80; x < 720; x++)
+        {
+            uint16_t b = landscape_pixel(below, x, y);
+            uint16_t actual = landscape_pixel(shown, x, y);
+            uint32_t fg = layer[(y / 2) * 320 + (x - 80) / 2];
+            unsigned alpha = fg >> 24;
+            const unsigned shifts[] = {11, 5, 0}, maxima[] = {31, 63, 31};
+            for (unsigned channel = 0; channel < 3; channel++)
+            {
+                unsigned max = maxima[channel], shift = shifts[channel];
+                unsigned bg = ((b >> shift) & max) * 255 / max;
+                unsigned f = fg >> (16 - channel * 8) & 255;
+                unsigned expected = ((f * alpha + bg * (255 - alpha) + 127) / 255 *
+                        max + 127) / 255;
+                assert(abs((int)((actual >> shift) & max) - (int)expected) <= 1);
+            }
+            if (alpha == 128 && b)
+                through += actual != 0 && actual != b;
+            if (alpha == 255)
+                opaque++;
+        }
+    assert(through > 1000 && opaque > 1000);
+    assert(landscape_pixel(shown, 626, 396) == 0xf800);
+    /* A visibility change during a draw cannot put controls above opaque UI. */
+    s_test_touch = 0;
+    s_test_toggle_touch = true;
+    ESP_ERROR_CHECK(gpsp_dsi_ui_draw(ui, NULL));
+    s_test_toggle_touch = false;
+    assert(landscape_pixel(last_frame(), 626, 396) == 0xf800);
+    assert(landscape_pixel(last_frame(), 0, 346) == 0);
+    /* Off/on refreshes reuse both the menu layer and the fixed pad geometry. */
+    s_test_touch = 0;
+    gpsp_lcd_ui_draw(0, 240);
+    memcpy(below, last_frame(), DSI_BYTES);
+    memset(ui, 0xff, 320 * 240 * sizeof(uint16_t));
+    for (unsigned enabled = 1; ; enabled--)
+    {
+        unsigned next = s_next;
+        s_test_touch = enabled ? GPSP_VIRTUAL_PAD_VISIBLE : 0;
+        gpsp_lcd_overlay_changed();
+        for (unsigned wait = 0; s_next == next && wait < 1000; wait++)
+            vTaskDelay(1);
+        assert(s_next != next);
+        if (!enabled)
+        {
+            assert(memcmp(below, last_frame(), DSI_BYTES) == 0);
+            break;
+        }
+        assert(landscape_pixel(last_frame(), 626, 396) == 0xf800);
+        assert(landscape_pixel(last_frame(), 0, 346) != 0);
+    }
+    heap_caps_free(below);
+    gpsp_lcd_ui_end();
+    const uint16_t *held;
+    assert(gpsp_lcd_ui_begin(&ui, &held));
+    gpsp_dsi_set_pad_opacity(25);
+    puts("DSI_CHECK menu layers: fixed pad, translucent panel, opaque text, cached redraw pass");
 }
 
 static void check_stats(uint16_t *input, uint16_t *ui)
@@ -602,6 +718,10 @@ static void display_check(void *arg)
     check_effects(input, ui);
     check_stats(input, ui);
     check_virtual_pad(input, ui);
+#if CONFIG_DSI_CHECK_MODEL
+    check_menu_allocations(&ui);
+#endif
+    check_menu_layers(ui);
     fill(input, 240, 160);
 #if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
 #if CONFIG_DSI_CHECK_MODEL

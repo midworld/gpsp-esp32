@@ -21,23 +21,68 @@ static unsigned s_command_head;
 static unsigned s_command_count;
 static bool s_in_game = true;
 
+static uint32_t *gpsp_ui_layer(uint16_t *pixels, uint16_t **background)
+{
+#if CONFIG_GPSP_MENU && CONFIG_GPSP_LCD_DSI && !CONFIG_ESPEMU
+    return gpsp_board_ui_layer(pixels, background);
+#else
+    (void)pixels;
+    if (background)
+        *background = NULL;
+    return NULL;
+#endif
+}
+
+static uint32_t gpsp_ui_argb(uint16_t color)
+{
+    unsigned r = color >> 11, g = color >> 5 & 63, b = color & 31;
+    return 0xff000000u | ((r << 3 | r >> 2) << 16) |
+            ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+}
+
+static uint32_t gpsp_ui_layer_tint(uint32_t below, uint32_t color)
+{
+    unsigned weight = ((below >> 24) * 127 + 127) / 255;
+    unsigned alpha = 128 + weight;
+    uint32_t result = alpha << 24;
+
+    for (unsigned shift = 0; shift < 24; shift += 8)
+        result |= ((((color >> shift & 255) * 128 +
+                (below >> shift & 255) * weight + alpha / 2) / alpha) << shift);
+    return result;
+}
+
 void gpsp_ui_fill(uint16_t *pixels, int x, int y, int w, int h,
         uint16_t color)
 {
+    uint32_t *layer = gpsp_ui_layer(pixels, NULL);
+    uint32_t argb = gpsp_ui_argb(color);
     for (int row = y; row < y + h; row++)
         for (int col = x; col < x + w; col++)
+        {
             pixels[row * GPSP_UI_WIDTH + col] = color;
+            if (layer)
+                layer[row * GPSP_UI_WIDTH + col] = argb;
+        }
 }
 
 void gpsp_ui_tint(uint16_t *pixels, int x, int y, int w, int h,
         uint16_t color)
 {
+    uint32_t *layer = gpsp_ui_layer(pixels, NULL);
+    uint32_t argb = gpsp_ui_argb(color);
     for (int row = y; row < y + h; row++)
         for (int col = x; col < x + w; col++)
         {
             uint16_t *pixel = &pixels[row * GPSP_UI_WIDTH + col];
 
             *pixel = gpsp_ui_blend(*pixel, color);
+            if (layer)
+            {
+                uint32_t *dest = &layer[row * GPSP_UI_WIDTH + col];
+                *dest = *dest ? gpsp_ui_layer_tint(*dest, argb) :
+                        (argb & 0xffffff) | 0x80000000u;
+            }
         }
 }
 
@@ -69,11 +114,19 @@ void gpsp_ui_backdrop(uint16_t *pixels, const uint16_t *frame)
             for (int x = 0; x < GPSP_UI_FRAME_WIDTH; x++)
                 pixels[(y0 + y) * GPSP_UI_WIDTH + x0 + x] =
                         (frame[y * GPSP_UI_FRAME_WIDTH + x] >> 1) & 0x7bef;
+    uint16_t *background;
+    uint32_t *layer = gpsp_ui_layer(pixels, &background);
+    if (layer)
+    {
+        memcpy(background, pixels, GPSP_UI_WIDTH * GPSP_UI_HEIGHT * 2);
+        memset(layer, 0, GPSP_UI_WIDTH * GPSP_UI_HEIGHT * 4);
+    }
 }
 
 void gpsp_ui_half_frame(uint16_t *pixels, int x, int y,
         const uint16_t *frame)
 {
+    uint32_t *layer = gpsp_ui_layer(pixels, NULL);
     for (int row = 0; row < GPSP_UI_FRAME_HEIGHT / 2; row++)
         for (int col = 0; col < GPSP_UI_FRAME_WIDTH / 2; col++)
         {
@@ -83,6 +136,9 @@ void gpsp_ui_half_frame(uint16_t *pixels, int x, int y,
                     gpsp_ui_blend(p[0], p[1]),
                     gpsp_ui_blend(p[GPSP_UI_FRAME_WIDTH],
                             p[GPSP_UI_FRAME_WIDTH + 1]));
+            if (layer)
+                layer[(y + row) * GPSP_UI_WIDTH + x + col] =
+                        gpsp_ui_argb(pixels[(y + row) * GPSP_UI_WIDTH + x + col]);
         }
 }
 
@@ -90,11 +146,17 @@ static void gpsp_ui_char(uint16_t *pixels, int x, int y, char c,
         uint16_t color)
 {
     const uint8_t *glyph = gpsp_font_glyph(c);
+    uint32_t *layer = gpsp_ui_layer(pixels, NULL);
+    uint32_t argb = gpsp_ui_argb(color);
 
     for (int row = 0; row < GPSP_UI_FONT_HEIGHT; row++)
         for (int col = 0; col < GPSP_UI_FONT_WIDTH; col++)
             if (glyph[row] >> col & 1)
+            {
                 pixels[(y + row) * GPSP_UI_WIDTH + x + col] = color;
+                if (layer)
+                    layer[(y + row) * GPSP_UI_WIDTH + x + col] = argb;
+            }
 }
 
 /* The next character as ASCII, or '?'; UTF-8 sequences count as one. */
@@ -159,6 +221,8 @@ int gpsp_ui_text_width(const char *text)
 void gpsp_ui_text_clip(uint16_t *pixels, int x, int y, const char *text,
         int offset, int width, uint16_t color)
 {
+    uint32_t *layer = gpsp_ui_layer(pixels, NULL);
+    uint32_t argb = gpsp_ui_argb(color);
     for (int left = x - offset; *text && left < x + width;
             left += GPSP_UI_FONT_WIDTH)
     {
@@ -172,7 +236,11 @@ void gpsp_ui_text_clip(uint16_t *pixels, int x, int y, const char *text,
                 continue;
             for (int row = 0; row < GPSP_UI_FONT_HEIGHT; row++)
                 if (glyph[row] >> col & 1)
+                {
                     pixels[(y + row) * GPSP_UI_WIDTH + px] = color;
+                    if (layer)
+                        layer[(y + row) * GPSP_UI_WIDTH + px] = argb;
+                }
         }
     }
 }

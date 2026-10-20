@@ -29,6 +29,7 @@
 #if CONFIG_GPSP_LCD_DSI
 #include "gpsp_lcd_dsi.h"
 #include "dsi_hud.h"
+#include "gpsp_touch.h"
 #endif
 
 #if CONFIG_GPSP_LCD_DSI
@@ -121,7 +122,29 @@ static SemaphoreHandle_t s_ui_done;
 static bool s_ui_pending;
 static uint16_t *s_ui_cached;
 static bool s_ui_cached_valid;
+static uint32_t *s_ui_layer;
+static uint16_t *s_ui_background, *s_ui_bg_cached;
+static bool s_ui_layered, s_ui_layer_cached, s_ui_layer_failed;
 static unsigned s_overlay_drawn;
+
+static void gpsp_lcd_ui_layers_free(void)
+{
+    heap_caps_free(s_ui_layer);
+    heap_caps_free(s_ui_background);
+    heap_caps_free(s_ui_bg_cached);
+    s_ui_layer = NULL;
+    s_ui_background = s_ui_bg_cached = NULL;
+    s_ui_layered = s_ui_layer_cached = false;
+}
+
+static void gpsp_lcd_ui_layers_fail(esp_err_t result)
+{
+    gpsp_lcd_ui_layers_free();
+    s_ui_layer_failed = true;
+    gpsp_touch_set_enabled(false);
+    ESP_LOGW(TAG, "Menu layers unavailable; virtual pad disabled: %s",
+            esp_err_to_name(result));
+}
 #endif
 /* The UI canvas is centered on the panel; a smaller panel crops it. */
 #define LCD_UI_WIDTH 320
@@ -375,10 +398,28 @@ static void gpsp_lcd_task(void *arg)
                 if (ui_frame)
                 {
                     memcpy(s_ui_cached, s_ui_pixels, LCD_UI_BYTES);
+                    s_ui_layer_cached = false;
+                    if (s_ui_layered)
+                    {
+                        esp_err_t result = gpsp_dsi_ui_update(s_ui_layer);
+                        if (result == ESP_OK)
+                            s_ui_layer_cached = true;
+                        else
+                            gpsp_lcd_ui_layers_fail(result);
+                    }
+                    if (s_ui_layer_cached)
+                        memcpy(s_ui_bg_cached, s_ui_background, LCD_UI_BYTES);
                     s_ui_cached_valid = true;
                 }
                 if (!s_stop)
-                    gpsp_dsi_draw(s_ui_cached, true);
+                {
+                    if (s_ui_layer_failed)
+                        gpsp_touch_set_enabled(false);
+                    if (s_ui_layer_cached)
+                        gpsp_dsi_ui_draw(s_ui_cached, s_ui_bg_cached);
+                    else
+                        gpsp_dsi_draw(s_ui_cached, true);
+                }
                 s_overlay_drawn = overlay_revision;
                 if (ui_frame)
                     xSemaphoreGive(s_ui_done);
@@ -654,6 +695,8 @@ bool gpsp_lcd_ui_begin(uint16_t **pixels, const uint16_t **frame)
     s_ui = true;
 #if CONFIG_GPSP_LCD_DSI
     s_ui_cached_valid = false;
+    s_ui_layered = s_ui_layer_cached = false;
+    s_ui_layer_failed = false;
 #endif
     portEXIT_CRITICAL(&s_lock);
     /* Waits for a frame on the display; the task then sends no more. */
@@ -672,6 +715,33 @@ bool gpsp_lcd_ui_begin(uint16_t **pixels, const uint16_t **frame)
         *frame = s_buffers[index];
     return true;
 }
+
+#if CONFIG_GPSP_LCD_DSI
+uint32_t *gpsp_lcd_ui_layer(uint16_t *pixels, uint16_t **background)
+{
+    if (background)
+        *background = NULL;
+    if (!s_ui || pixels != s_ui_pixels || !gpsp_touch_available() || s_ui_layer_failed)
+        return NULL;
+    if (background)
+    {
+        if (!s_ui_layer)
+            s_ui_layer = heap_caps_aligned_alloc(64, LCD_UI_BYTES * 2,
+                    MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+        if (!s_ui_background)
+            s_ui_background = heap_caps_malloc(LCD_UI_BYTES, MALLOC_CAP_SPIRAM);
+        if (!s_ui_bg_cached)
+            s_ui_bg_cached = heap_caps_aligned_alloc(64, LCD_UI_BYTES,
+                    MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+        s_ui_layered = s_ui_layer && s_ui_background && s_ui_bg_cached;
+        if (s_ui_layered)
+            *background = s_ui_background;
+        else
+            gpsp_lcd_ui_layers_fail(ESP_ERR_NO_MEM);
+    }
+    return s_ui_layered ? s_ui_layer : NULL;
+}
+#endif
 
 void gpsp_lcd_ui_draw(unsigned y0, unsigned y1)
 {
@@ -720,6 +790,9 @@ void gpsp_lcd_ui_end(void)
 {
     if (!s_ui)
         return;
+#if CONFIG_GPSP_LCD_DSI
+    s_ui_layered = false;
+#endif
     memset(s_ui_pixels, 0, LCD_UI_BYTES);
     gpsp_lcd_ui_draw(0, LCD_UI_HEIGHT);
 
@@ -768,6 +841,8 @@ void gpsp_lcd_shutdown(void)
     s_ui_pending = false;
     heap_caps_free(s_ui_cached);
     s_ui_cached = NULL;
+    gpsp_lcd_ui_layers_free();
+    s_ui_layer_failed = false;
     s_ui_cached_valid = false;
     if (s_ui_done)
     {
