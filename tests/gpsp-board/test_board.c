@@ -12,6 +12,7 @@
 
 static bool lcd, audio, usb, status, serial, transport;
 static bool menu_wifi;
+static bool muted;
 static esp_err_t transport_result;
 static esp_err_t peripheral_result;
 
@@ -71,6 +72,9 @@ int gpsp_audio_volume_step(int steps)
     return -6 + steps;
 }
 
+bool gpsp_audio_muted(void) { assert(audio); return muted; }
+void gpsp_audio_set_muted(bool value) { assert(audio); muted = value; }
+
 esp_err_t gpsp_usb_pad_init(void)
 {
     usb = peripheral_result == ESP_OK;
@@ -123,6 +127,11 @@ int main(void)
     assert(gpsp_board_init() == ESP_OK);
     assert(lcd && audio && usb && status && transport);
     assert(gpsp_board_audio_volume_step(0) == -6);
+    gpsp_board_audio_set_muted(true);
+    assert(gpsp_board_audio_muted());
+    assert(gpsp_board_audio_volume_step(0) == -6);
+    gpsp_board_audio_set_muted(false);
+    assert(!gpsp_board_audio_muted());
     gpsp_board_input_read();
     assert(serial);
     menu_wifi = true;
@@ -134,6 +143,8 @@ int main(void)
     assert(gpsp_board_init() == ESP_OK);
     assert(!lcd && !audio && !usb && status && transport);
     assert(gpsp_board_audio_volume_step(0) == INT_MIN);
+    gpsp_board_audio_set_muted(true);
+    assert(!gpsp_board_audio_muted());
     gpsp_board_shutdown();
     assert_stopped();
     puts("board lifecycle: PASS");

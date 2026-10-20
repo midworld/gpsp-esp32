@@ -216,6 +216,8 @@ float gpsp_board_audio_fill(void);
  * @return The volume in dB, or INT_MIN without a speaker.
  */
 int gpsp_board_audio_volume_step(int steps);
+bool gpsp_board_audio_muted(void);
+void gpsp_board_audio_set_muted(bool muted);
 
 void gpsp_board_shutdown(void);
 

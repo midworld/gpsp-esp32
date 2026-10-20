@@ -3,6 +3,7 @@
  *   frameskip=off|auto|<n>      <n> frames skipped after each drawn one
  *   frameskip_threshold=<n>     auto frameskip level, % of the queue target
  *   volume=<dB>                 speaker volume, -60 to 0
+ *   mute=on|off                 mute without changing volume
  *   state_slot=auto|<n>         state slot, 0 to 9
  *   state_auto_save=on|off      save the auto slot when the game closes
  *   state_auto_load=on|off      load the auto slot when the game starts
@@ -53,6 +54,7 @@ struct gpsp_settings
     int frameskip;
     unsigned threshold;
     int volume_db;
+    bool muted;
     int slot;
     bool auto_save;
     bool auto_load;
@@ -160,6 +162,7 @@ static void gpsp_settings_current(struct gpsp_settings *settings)
     settings->frameskip = s_frameskip;
     settings->threshold = s_threshold;
     settings->volume_db = gpsp_board_audio_volume_step(0);
+    settings->muted = gpsp_board_audio_muted();
     settings->slot = gpsp_state_slot();
     settings->auto_save = s_auto_save;
     settings->auto_load = s_auto_load;
@@ -243,6 +246,9 @@ void gpsp_settings_load(void)
             gpsp_settings_number(value, -60, 0, &number))
         gpsp_board_audio_volume_step(((int)number - volume_db) /
                 GPSP_SETTINGS_VOLUME_STEP_DB);
+    bool muted = false;
+    gpsp_settings_switch("mute", &muted);
+    gpsp_board_audio_set_muted(muted);
 
     if (gpsp_storage_config("state_slot", value, sizeof(value)))
     {
@@ -284,16 +290,16 @@ void gpsp_settings_load(void)
     }
 
     gpsp_settings_current(&s_saved);
-    ESP_LOGI(TAG, "Settings: frameskip=%d threshold=%u%% volume=%d slot=%d "
+    ESP_LOGI(TAG, "Settings: frameskip=%d threshold=%u%% volume=%d mute=%d slot=%d "
             "auto_save=%d auto_load=%d fast_forward=%ux%s", s_saved.frameskip,
-            s_saved.threshold, s_saved.volume_db, s_saved.slot,
+            s_saved.threshold, s_saved.volume_db, s_saved.muted, s_saved.slot,
             s_saved.auto_save, s_saved.auto_load, s_saved.fast_forward_speed,
             s_saved.fast_forward_toggle ? " toggle" : "");
 }
 
 void gpsp_settings_save(void)
 {
-    struct gpsp_storage_setting settings[12 + GPSP_SETTINGS_CONTROL_COUNT];
+    struct gpsp_storage_setting settings[13 + GPSP_SETTINGS_CONTROL_COUNT];
     char controls[GPSP_SETTINGS_CONTROL_COUNT][8];
     char speed[4];
     char frameskip[8];
@@ -326,6 +332,9 @@ void gpsp_settings_save(void)
         snprintf(volume, sizeof(volume), "%d", now.volume_db);
         settings[count++] = (struct gpsp_storage_setting){ "volume", volume };
     }
+    if (now.muted != s_saved.muted)
+        settings[count++] = (struct gpsp_storage_setting){
+            "mute", now.muted ? "on" : "off" };
     if (now.slot != s_saved.slot)
     {
         if (now.slot == GPSP_STATE_AUTO)

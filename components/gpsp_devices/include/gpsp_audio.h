@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "esp_err.h"
 
@@ -40,6 +41,10 @@ float gpsp_audio_fill(void);
  * @return The new volume in dB.
  */
 int gpsp_audio_volume_step(int steps);
+
+/* Mute the DAC without changing volume or audio queue timing. */
+bool gpsp_audio_muted(void);
+void gpsp_audio_set_muted(bool muted);
 
 /**
  * Queued sound in milliseconds, queue shortages, and I2S send queue

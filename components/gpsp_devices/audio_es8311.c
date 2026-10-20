@@ -100,6 +100,8 @@ static atomic_uint s_tail;
 static atomic_uint s_underruns;
 /* Requested DAC volume; the audio task owns the codec and applies it. */
 static atomic_int s_volume_db;
+static atomic_bool s_muted;
+static uint8_t s_dac_control;
 /* Running average of the level while playing; the raw level otherwise. */
 static atomic_uint s_smooth_level;
 static atomic_uint s_i2s_overflows;
@@ -197,7 +199,22 @@ static bool codec_try_volume(int db)
 
 static esp_err_t codec_mute(bool mute)
 {
-    return codec_field(ES_DAC_CONTROL, AUDIO_MUTE, mute ? AUDIO_MUTE : 0);
+    esp_err_t result = codec_field(ES_DAC_CONTROL, AUDIO_MUTE,
+            mute ? AUDIO_MUTE : 0);
+
+    return result == ESP_OK ?
+            codec_transfer(ES_DAC_CONTROL, &s_dac_control, true) : result;
+}
+
+static bool codec_try_mute(bool mute)
+{
+    uint8_t value = (s_dac_control & ~AUDIO_MUTE) | (mute ? AUDIO_MUTE : 0);
+    uint8_t message[2] = {ES_DAC_CONTROL, value};
+
+    if (!s_codec || i2c_master_transmit(s_codec, message, sizeof(message), 5) != ESP_OK)
+        return false;
+    s_dac_control = value;
+    return true;
 }
 
 #define CODEC_TRY(call) do { result = (call); if (result != ESP_OK) return result; } while (0)
@@ -274,8 +291,9 @@ static void audio_task(void *arg)
     static int16_t block[AUDIO_BLOCK];
     static const int16_t silence[AUDIO_BLOCK];
     bool playing = false;
-    bool unmuted = false;
-    int volume_db = 0;
+    bool ready = false;
+    bool muted = true;
+    int volume_db = -60;
     unsigned average = 0;
     uint32_t fraction = 0;
 
@@ -284,6 +302,22 @@ static void audio_task(void *arg)
     atomic_store(&s_i2s_overflows, 0);
     while (atomic_load(&s_running))
     {
+        bool wanted_mute = atomic_load(&s_muted) || !ready;
+        int wanted_volume = atomic_load(&s_volume_db);
+
+        /* At most one short codec write per block; mute takes priority. */
+        if (wanted_mute && !muted)
+        {
+            if (codec_try_mute(true))
+                muted = true;
+        }
+        else if (volume_db != wanted_volume)
+        {
+            if (codec_try_volume(wanted_volume))
+                volume_db = wanted_volume;
+        }
+        else if (!wanted_mute && muted && codec_try_mute(false))
+            muted = false;
         unsigned level = audio_level();
 
         /* Start, or restart after a shortage, only with the target queued,
@@ -353,20 +387,7 @@ static void audio_task(void *arg)
         }
         atomic_store(&s_tail, tail);
         audio_send(block, AUDIO_BLOCK);
-
-        /* Retried every block until the codec takes both settings. */
-        if (!unmuted)
-        {
-            volume_db = atomic_load(&s_volume_db);
-            unmuted = codec_volume(volume_db) == ESP_OK &&
-                    codec_mute(false) == ESP_OK;
-        }
-        else if (volume_db != atomic_load(&s_volume_db))
-        {
-            int wanted = atomic_load(&s_volume_db);
-            if (codec_try_volume(wanted))
-                volume_db = wanted;
-        }
+        ready = true;
     }
 
     s_task = NULL;
@@ -429,6 +450,16 @@ int gpsp_audio_volume_step(int steps)
     }
 }
 
+bool gpsp_audio_muted(void)
+{
+    return atomic_load(&s_muted);
+}
+
+void gpsp_audio_set_muted(bool muted)
+{
+    atomic_store(&s_muted, muted);
+}
+
 void gpsp_audio_stats(unsigned *queued_ms, unsigned *underruns,
         unsigned *i2s_overflows)
 {
@@ -480,6 +511,7 @@ esp_err_t gpsp_audio_init(void)
     atomic_store(&s_tail, 0);
     atomic_store(&s_underruns, 0);
     atomic_store(&s_volume_db, CONFIG_GPSP_AUDIO_VOLUME_DB);
+    atomic_store(&s_muted, false);
     atomic_store(&s_smooth_level, 0);
     atomic_store(&s_i2s_overflows, 0);
 

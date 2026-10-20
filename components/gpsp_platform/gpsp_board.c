@@ -423,6 +423,25 @@ int gpsp_board_audio_volume_step(int steps)
     return INT_MIN;
 }
 
+bool gpsp_board_audio_muted(void)
+{
+#if CONFIG_GPSP_AUDIO
+    return s_audio_ready && gpsp_audio_muted();
+#else
+    return false;
+#endif
+}
+
+void gpsp_board_audio_set_muted(bool muted)
+{
+#if CONFIG_GPSP_AUDIO
+    if (s_audio_ready)
+        gpsp_audio_set_muted(muted);
+#else
+    (void)muted;
+#endif
+}
+
 void gpsp_board_shutdown(void)
 {
 #if CONFIG_GPSP_SERIAL_INPUT

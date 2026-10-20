@@ -106,6 +106,7 @@ enum menu_item
     MENU_ITEM_FRAMESKIP,
     MENU_ITEM_THRESHOLD,
     MENU_ITEM_VOLUME,
+    MENU_ITEM_MUTE,
     MENU_ITEM_DISPLAY,
     MENU_ITEM_COLOR,
     MENU_ITEM_STATS,
@@ -143,6 +144,7 @@ static const char *const s_item_names[MENU_ITEM_COUNT] = {
     [MENU_ITEM_FRAMESKIP] = "Frameskip",
     [MENU_ITEM_THRESHOLD] = "Threshold",
     [MENU_ITEM_VOLUME] = "Volume",
+    [MENU_ITEM_MUTE] = "Mute",
     [MENU_ITEM_DISPLAY] = "Display",
     [MENU_ITEM_COLOR] = "Colors",
     [MENU_ITEM_STATS] = "STAT",
@@ -275,6 +277,8 @@ static bool menu_item_value(enum menu_item item, char *value, size_t size)
 
     if (item == MENU_ITEM_VOLUME)
         snprintf(value, size, "< %d dB >", gpsp_board_audio_volume_step(0));
+    else if (item == MENU_ITEM_MUTE)
+        snprintf(value, size, gpsp_board_audio_muted() ? "< On >" : "< Off >");
     else if (item == MENU_ITEM_FRAMESKIP)
     {
         int frameskip = gpsp_settings_frameskip();
@@ -477,7 +481,7 @@ static void menu_build_items(void)
     s_item_count = 0;
     for (int i = 0; i < MENU_ITEM_COUNT; i++)
         if (menu_item_page((enum menu_item)i) == s_page &&
-                (i != MENU_ITEM_VOLUME || speaker) &&
+                ((i != MENU_ITEM_VOLUME && i != MENU_ITEM_MUTE) || speaker) &&
                 ((i != MENU_ITEM_DISPLAY && i != MENU_ITEM_COLOR &&
                         i != MENU_ITEM_STATS) || display) &&
                 (i != MENU_ITEM_THRESHOLD || automatic) &&
@@ -538,6 +542,8 @@ static void menu_direction(uint32_t buttons)
     else if (s_items[s_cursor] == MENU_ITEM_VOLUME)
         gpsp_board_audio_volume_step(
                 buttons & MENU_BUTTON(RIGHT) ? 1 : -1);
+    else if (s_items[s_cursor] == MENU_ITEM_MUTE)
+        gpsp_board_audio_set_muted(!gpsp_board_audio_muted());
     else if (s_items[s_cursor] == MENU_ITEM_FRAMESKIP)
         menu_step_frameskip(buttons & MENU_BUTTON(RIGHT) ? 1 : -1);
     else if (s_items[s_cursor] == MENU_ITEM_THRESHOLD)
@@ -992,6 +998,12 @@ enum gpsp_menu_result gpsp_menu_run(bool in_game)
                 menu_open_page(item == MENU_ITEM_SETTINGS ? MENU_PAGE_SETTINGS :
                         item == MENU_ITEM_CONTROLS ? MENU_PAGE_CONTROLS :
                         MENU_PAGE_WIFI);
+                continue;
+            }
+            if (item == MENU_ITEM_MUTE)
+            {
+                gpsp_board_audio_set_muted(!gpsp_board_audio_muted());
+                menu_redraw();
                 continue;
             }
             if (item >= MENU_ITEM_CONTROL_A &&
