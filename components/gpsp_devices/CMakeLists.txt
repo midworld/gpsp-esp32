@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 if("$ENV{GPSP_BUILD_ESPEMU}" STREQUAL "1")
-    idf_component_register()
+    idf_component_register(INCLUDE_DIRS "include")
 else()
     if("$ENV{IDF_COMPONENT_MANAGER}" STREQUAL "0")
         set(gpsp_hosted_component espressif__esp_hosted)
@@ -16,7 +16,8 @@ else()
 
     idf_component_register(
         SRCS "audio_es8311.c" "i2c_bus.c" "network.c" "usb_pad.c" "sdmmc.c"
-            "usb_bt.c" "usb_bt_packet.c"
+            "playstation_pad.c" "bt_pad.c" "usb_bt.c" "usb_bt_packet.c"
+            "hid_gamepad.cc" "third_party/hid_report_parser/hid_report_parser.cpp"
             "$ENV{GPSP_BOARD_DIR}/board.c"
         INCLUDE_DIRS "include"
         REQUIRED_IDF_TARGETS esp32p4
@@ -26,6 +27,10 @@ else()
             gpsp bt mbedtls nvs_flash fatfs sdmmc esp_driver_sdmmc
             ${gpsp_hosted_component} ${gpsp_wifi_remote_component} ${gpsp_usb_component}
     )
+    # Unmodified upstream parser: keep its warnings out of the build.
+    target_include_directories(${COMPONENT_LIB} SYSTEM PRIVATE "third_party/hid_report_parser")
+    set_source_files_properties("third_party/hid_report_parser/hid_report_parser.cpp"
+        PROPERTIES COMPILE_OPTIONS "-w")
     if(CONFIG_GPSP_USB_PAD_DIAGNOSTICS)
         # Trace root-port events without changing the USB driver.
         idf_component_get_property(gpsp_usb_dir ${gpsp_usb_component} COMPONENT_DIR)

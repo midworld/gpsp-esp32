@@ -12,7 +12,8 @@
 #include "esp_err.h"
 
 /* Supports XInput (Xbox 360 class), Xbox One, Switch Pro Controller,
-   DualShock 4 and DualSense devices. */
+   DualShock 4 and DualSense devices. Optional USB HCI adapters provide
+   Bluetooth Classic connections for PlayStation pads. */
 esp_err_t gpsp_usb_pad_init(void);
 
 /**

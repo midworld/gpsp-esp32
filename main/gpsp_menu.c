@@ -24,6 +24,7 @@
 #include "esp_timer.h"
 
 #include "gpsp_board.h"
+#include "gpsp_bt.h"
 #include "gpsp_keyboard.h"
 #include "gpsp_loader.h"
 #include "gpsp_screenshot.h"
@@ -84,12 +85,14 @@ enum menu_page
     MENU_PAGE_SETTINGS,
     MENU_PAGE_CONTROLS,
     MENU_PAGE_WIFI,
+    MENU_PAGE_BT,
 };
 
 static const char *const s_page_paths[] = {
     [MENU_PAGE_SETTINGS] = "Settings",
     [MENU_PAGE_CONTROLS] = "Settings > Controls",
     [MENU_PAGE_WIFI] = "Settings > Wi-Fi",
+    [MENU_PAGE_BT] = "Settings > Bluetooth",
 };
 
 /* Items in page order; each page starts at its first item below. */
@@ -114,6 +117,7 @@ enum menu_item
     MENU_ITEM_AUTO_LOAD,
     MENU_ITEM_CONTROLS,
     MENU_ITEM_WIFI,
+    MENU_ITEM_BT,
     /* In the order of enum gpsp_settings_control. */
     MENU_ITEM_CONTROL_A,
     MENU_ITEM_CONTROL_B,
@@ -131,6 +135,15 @@ enum menu_item
     MENU_ITEM_WIFI_PASSWORD,
     MENU_ITEM_WIFI_CONNECT,
     MENU_ITEM_WIFI_FORGET,
+    MENU_ITEM_BT_STATUS,
+    MENU_ITEM_BT_SEARCH,
+    MENU_ITEM_BT_DEVICE,
+    MENU_ITEM_BT_ADDRESS,
+    MENU_ITEM_BT_CONNECT,
+    MENU_ITEM_BT_DISCONNECT,
+    MENU_ITEM_BT_AUTO,
+    MENU_ITEM_BT_FORGET,
+    MENU_ITEM_BT_FORGET_ALL,
     MENU_ITEM_COUNT,
 };
 
@@ -154,6 +167,7 @@ static const char *const s_item_names[MENU_ITEM_COUNT] = {
     [MENU_ITEM_SETTINGS] = "Settings",
     [MENU_ITEM_CONTROLS] = "Controls",
     [MENU_ITEM_WIFI] = "Wi-Fi",
+    [MENU_ITEM_BT] = "Bluetooth",
     [MENU_ITEM_CONTROL_A] = "A",
     [MENU_ITEM_CONTROL_B] = "B",
     [MENU_ITEM_CONTROL_L] = "L",
@@ -170,10 +184,21 @@ static const char *const s_item_names[MENU_ITEM_COUNT] = {
     [MENU_ITEM_WIFI_PASSWORD] = "Password",
     [MENU_ITEM_WIFI_CONNECT] = "Connect",
     [MENU_ITEM_WIFI_FORGET] = "Forget",
+    [MENU_ITEM_BT_STATUS] = "Status",
+    [MENU_ITEM_BT_SEARCH] = "Search",
+    [MENU_ITEM_BT_DEVICE] = "Controller",
+    [MENU_ITEM_BT_ADDRESS] = "Address",
+    [MENU_ITEM_BT_CONNECT] = "Pair / Connect",
+    [MENU_ITEM_BT_DISCONNECT] = "Disconnect / Cancel",
+    [MENU_ITEM_BT_AUTO] = "Auto Reconnect",
+    [MENU_ITEM_BT_FORGET] = "Forget Controller",
+    [MENU_ITEM_BT_FORGET_ALL] = "Forget All",
 };
 
 static enum menu_page menu_item_page(enum menu_item item)
 {
+    if (item >= MENU_ITEM_BT_STATUS)
+        return MENU_PAGE_BT;
     if (item >= MENU_ITEM_WIFI_NETWORK)
         return MENU_PAGE_WIFI;
     if (item >= MENU_ITEM_CONTROL_A)
@@ -245,6 +270,19 @@ static char s_message[40];
 /* The control waiting for a button, or -1. */
 static int s_capture = -1;
 static int64_t s_capture_end_us;
+static struct gpsp_bt_info s_bt;
+static unsigned s_bt_selected;
+static int s_bt_confirm = -1;
+static int64_t s_bt_poll_us, s_bt_confirm_us;
+
+static const char *menu_bt_state(enum gpsp_bt_state state)
+{
+    static const char *const names[] = {
+        "Disabled", "No adapter", "Starting", "Ready", "Searching",
+        "Connecting", "Connected", "Disconnecting", "Error",
+    };
+    return state <= GPSP_BT_ERROR ? names[state] : "Error";
+}
 
 
 /* The ROM file name without its directory and extension. */
@@ -310,7 +348,7 @@ static bool menu_item_value(enum menu_item item, char *value, size_t size)
     else if (item == MENU_ITEM_STATS)
         snprintf(value, size, gpsp_settings_stats() ? "< On >" : "< Off >");
     else if (item == MENU_ITEM_SETTINGS || item == MENU_ITEM_CONTROLS ||
-            item == MENU_ITEM_WIFI)
+            item == MENU_ITEM_WIFI || item == MENU_ITEM_BT)
         snprintf(value, size, ">");
     else if (item >= MENU_ITEM_CONTROL_A &&
             item <= MENU_ITEM_CONTROL_FAST_FORWARD)
@@ -333,6 +371,33 @@ static bool menu_item_value(enum menu_item item, char *value, size_t size)
                 "********" : "(none)");
     else if (item == MENU_ITEM_WIFI_CONNECT && s_wifi_status[0])
         snprintf(value, size, "%s", s_wifi_status);
+    else if (item == MENU_ITEM_BT_STATUS)
+        snprintf(value, size, "%s", menu_bt_state(s_bt.state));
+    else if (item == MENU_ITEM_BT_SEARCH)
+        snprintf(value, size, s_bt.state == GPSP_BT_SEARCHING ? "< Stop >" : "< Start >");
+    else if (item == MENU_ITEM_BT_DEVICE)
+    {
+        if (!s_bt.count)
+            snprintf(value, size, "(none)");
+        else
+        {
+            const struct gpsp_bt_device *device = &s_bt.devices[s_bt_selected];
+
+            snprintf(value, size, "< %u/%u %.10s%s >", s_bt_selected + 1, s_bt.count,
+                    device->pad == GPSP_BT_PAD_DS5 ? "Sense" :
+                    device->pad == GPSP_BT_PAD_DS4 ? "DS4" :
+                    device->name[0] ? device->name : "Pad",
+                    device->paired ? "*" : "");
+        }
+    }
+    else if (item == MENU_ITEM_BT_ADDRESS && s_bt.count)
+    {
+        const uint8_t *a = s_bt.devices[s_bt_selected].address;
+        snprintf(value, size, "%02X:%02X:%02X:%02X:%02X:%02X",
+                a[0], a[1], a[2], a[3], a[4], a[5]);
+    }
+    else if (item == MENU_ITEM_BT_AUTO)
+        snprintf(value, size, s_bt.auto_connect ? "< On >" : "< Off >");
     else if (item == MENU_ITEM_SLOT && slot == GPSP_STATE_AUTO)
         snprintf(value, size, "< Auto >");
     else if (item == MENU_ITEM_SLOT)
@@ -445,6 +510,8 @@ static void menu_draw_panel(void)
                 MENU_TEXT_CHARS, MENU_COLOR_TITLE);
     else
         gpsp_ui_text(s_pixels, MENU_TEXT_X, MENU_FOOTER_Y,
+                s_page == MENU_PAGE_BT ?
+                "*: Saved  Share/Create + PS: Pair" :
                 s_page == MENU_PAGE_CONTROLS ?
                 "A: Set  X: Clear  B: Back  <>: Change" :
                 s_in_game || s_depth ? "A: OK  B: Back  Left/Right: Change" :
@@ -473,6 +540,8 @@ static void menu_scroll_name(int64_t now_us)
 
 static void menu_build_items(void)
 {
+    struct gpsp_bt_info bt;
+    gpsp_bt_get_info(&bt);
     bool speaker = gpsp_board_audio_volume_step(0) != INT_MIN;
     bool display = gpsp_settings_display_available();
     bool automatic =
@@ -482,6 +551,7 @@ static void menu_build_items(void)
     for (int i = 0; i < MENU_ITEM_COUNT; i++)
         if (menu_item_page((enum menu_item)i) == s_page &&
                 ((i != MENU_ITEM_VOLUME && i != MENU_ITEM_MUTE) || speaker) &&
+                (i != MENU_ITEM_BT || bt.state != GPSP_BT_DISABLED) &&
                 ((i != MENU_ITEM_DISPLAY && i != MENU_ITEM_COLOR &&
                         i != MENU_ITEM_STATS) || display) &&
                 (i != MENU_ITEM_THRESHOLD || automatic) &&
@@ -530,6 +600,9 @@ static void menu_step_threshold(int step)
 /* Moves the cursor or changes the value under it. */
 static void menu_direction(uint32_t buttons)
 {
+    s_bt_confirm = -1;
+    if (s_page == MENU_PAGE_BT)
+        s_message[0] = '\0';
     if (buttons & (MENU_BUTTON(UP) | MENU_BUTTON(DOWN)))
     {
         s_cursor += buttons & MENU_BUTTON(UP) ? s_item_count - 1 : 1;
@@ -544,6 +617,11 @@ static void menu_direction(uint32_t buttons)
                 buttons & MENU_BUTTON(RIGHT) ? 1 : -1);
     else if (s_items[s_cursor] == MENU_ITEM_MUTE)
         gpsp_board_audio_set_muted(!gpsp_board_audio_muted());
+    else if (s_items[s_cursor] == MENU_ITEM_BT_DEVICE && s_bt.count)
+        s_bt_selected = (s_bt_selected + (buttons & MENU_BUTTON(RIGHT) ?
+                1 : s_bt.count - 1)) % s_bt.count;
+    else if (s_items[s_cursor] == MENU_ITEM_BT_AUTO)
+        gpsp_bt_request(s_bt.auto_connect ? GPSP_BT_AUTO_OFF : GPSP_BT_AUTO_ON, NULL);
     else if (s_items[s_cursor] == MENU_ITEM_FRAMESKIP)
         menu_step_frameskip(buttons & MENU_BUTTON(RIGHT) ? 1 : -1);
     else if (s_items[s_cursor] == MENU_ITEM_THRESHOLD)
@@ -605,6 +683,141 @@ static void menu_show(const char *message)
     menu_redraw();
 }
 
+static const char *menu_bt_error(enum gpsp_bt_error error)
+{
+    switch (error)
+    {
+        case GPSP_BT_INIT_FAILED: return "Bluetooth initialization failed";
+        case GPSP_BT_INIT_TIMEOUT: return "Bluetooth initialization timed out";
+        case GPSP_BT_NO_CLASSIC: return "Adapter needs Bluetooth Classic";
+        case GPSP_BT_CONNECT_FAILED: return "Connection failed. Try pairing again";
+        case GPSP_BT_CONNECT_TIMEOUT: return "Connection timed out. Try again";
+        case GPSP_BT_STORAGE_FAILED: return "Could not save Bluetooth settings";
+        case GPSP_BT_LAYOUT_FAILED: return "Could not read controller layout";
+        case GPSP_BT_UNSUPPORTED: return "Not a supported controller";
+        default: return "";
+    }
+}
+
+static void menu_bt_poll(int64_t now)
+{
+    if (s_page != MENU_PAGE_BT || now < s_bt_poll_us)
+        return;
+    s_bt_poll_us = now + 200000;
+    struct gpsp_bt_info info;
+    gpsp_bt_get_info(&info);
+    bool changed = memcmp(&info, &s_bt, sizeof(info)) != 0;
+    bool expired = s_bt_confirm >= 0 && now >= s_bt_confirm_us;
+
+    if (!changed && !expired)
+        return;
+    if (s_bt_selected >= info.count)
+        s_bt_selected = 0;
+    if (info.state == GPSP_BT_ABSENT || info.state == GPSP_BT_STARTING)
+        s_bt_confirm = -1;
+    if (expired)
+        s_bt_confirm = -1;
+    if (s_bt_confirm < 0 && (expired || info.completed != s_bt.completed || info.state != s_bt.state ||
+            info.error != s_bt.error))
+    {
+        s_message[0] = '\0';
+        if (info.error)
+            snprintf(s_message, sizeof(s_message), "%s", menu_bt_error(info.error));
+        else if (info.state == GPSP_BT_ABSENT)
+            snprintf(s_message, sizeof(s_message), "Connect a USB Bluetooth adapter");
+        else if (info.state == GPSP_BT_SEARCHING)
+            snprintf(s_message, sizeof(s_message), "Share/Create + PS, then select a pad");
+        else if (info.state == GPSP_BT_CONNECTING)
+            snprintf(s_message, sizeof(s_message), "Connecting...");
+        else if (info.state == GPSP_BT_CONNECTED)
+            snprintf(s_message, sizeof(s_message), "Controller connected");
+        else if (s_bt.state == GPSP_BT_SEARCHING && info.state == GPSP_BT_IDLE)
+        {
+            bool found = false;
+            for (unsigned i = 0; i < info.count; i++)
+                found |= info.devices[i].found;
+            snprintf(s_message, sizeof(s_message), "%s", found ?
+                    "Select a pad, then Pair / Connect" : "No controllers found");
+        }
+        else if (info.completed != s_bt.completed)
+            snprintf(s_message, sizeof(s_message), "Done");
+    }
+    s_bt = info;
+    menu_redraw();
+}
+
+static void menu_bt_action(enum menu_item item)
+{
+    enum gpsp_bt_action action;
+    const uint8_t *address = s_bt.count ? s_bt.devices[s_bt_selected].address : NULL;
+
+    if (s_bt.state < GPSP_BT_IDLE || s_bt.state > GPSP_BT_CONNECTED)
+    {
+        menu_show(s_bt.error ? menu_bt_error(s_bt.error) : "Bluetooth adapter is not ready");
+        return;
+    }
+    switch (item)
+    {
+        case MENU_ITEM_BT_SEARCH:
+            if (s_bt.state == GPSP_BT_CONNECTED || s_bt.state == GPSP_BT_CONNECTING)
+            {
+                menu_show("Disconnect before searching");
+                return;
+            }
+            action = s_bt.state == GPSP_BT_SEARCHING ? GPSP_BT_STOP_SEARCH : GPSP_BT_SEARCH;
+            break;
+        case MENU_ITEM_BT_CONNECT:
+            if (!address)
+            {
+                menu_show("Search for a controller first");
+                return;
+            }
+            if (s_bt.state == GPSP_BT_CONNECTED || s_bt.state == GPSP_BT_CONNECTING)
+            {
+                menu_show("Disconnect the current controller first");
+                return;
+            }
+            action = GPSP_BT_CONNECT;
+            break;
+        case MENU_ITEM_BT_DISCONNECT:
+            action = GPSP_BT_DISCONNECT;
+            break;
+        case MENU_ITEM_BT_AUTO:
+            action = s_bt.auto_connect ? GPSP_BT_AUTO_OFF : GPSP_BT_AUTO_ON;
+            break;
+        case MENU_ITEM_BT_FORGET:
+        case MENU_ITEM_BT_FORGET_ALL:
+            if (item == MENU_ITEM_BT_FORGET && !address)
+                return;
+            if (s_bt_confirm != item)
+            {
+                s_bt_confirm = item;
+                s_bt_confirm_us = esp_timer_get_time() + 5000000;
+                menu_show(item == MENU_ITEM_BT_FORGET ?
+                        "A: Forget this pad?  B: Cancel" : "A: Forget all pads?  B: Cancel");
+                return;
+            }
+            s_bt_confirm = -1;
+            action = item == MENU_ITEM_BT_FORGET ? GPSP_BT_FORGET : GPSP_BT_FORGET_ALL;
+            break;
+        default:
+            return;
+    }
+    menu_show(gpsp_bt_request(action, address) ? "Working..." : "Bluetooth is busy. Try again");
+}
+
+static void menu_bt_close(void)
+{
+    if (s_page == MENU_PAGE_BT)
+    {
+        struct gpsp_bt_info info;
+        gpsp_bt_get_info(&info);
+        if (info.state == GPSP_BT_SEARCHING)
+            gpsp_bt_request(GPSP_BT_STOP_SEARCH, NULL);
+    }
+    s_bt_confirm = -1;
+}
+
 static void menu_save(void)
 {
     bool ok;
@@ -650,6 +863,19 @@ static void menu_open_page(enum menu_page page)
         s_wifi = s_wifi_saved;
         s_wifi_status[0] = '\0';
     }
+    if (page == MENU_PAGE_BT)
+    {
+        gpsp_bt_get_info(&s_bt);
+        s_bt_selected = 0;
+        s_bt_confirm = -1;
+        s_bt_poll_us = 0;
+        for (unsigned i = 0; i < s_bt.count; i++)
+            if (!memcmp(s_bt.devices[i].address, s_bt.active, 6))
+                s_bt_selected = i;
+        snprintf(s_message, sizeof(s_message), "%s", s_bt.error ?
+                menu_bt_error(s_bt.error) : s_bt.state == GPSP_BT_ABSENT ?
+                "Connect a USB Bluetooth adapter" : "");
+    }
     menu_build_items();
     menu_redraw();
     /* A saved network is joined right away. */
@@ -686,6 +912,7 @@ static bool menu_close_page(void)
         return false;
     if (s_page == MENU_PAGE_WIFI)
         menu_wifi_close();
+    menu_bt_close();
     s_depth--;
     s_page = s_stack[s_depth].page;
     s_cursor = s_stack[s_depth].cursor;
@@ -968,6 +1195,7 @@ enum gpsp_menu_result gpsp_menu_run(bool in_game)
         int64_t now_us = esp_timer_get_time();
 
         held = input;
+        menu_bt_poll(now_us);
         /* A press that ends a wait does nothing else; commands below
            still run. */
         if (s_capture >= 0)
@@ -978,8 +1206,17 @@ enum gpsp_menu_result gpsp_menu_run(bool in_game)
         /* Without a game the menu only leaves through Game List. */
         if ((pressed & GPSP_BOARD_INPUT_HOME) && s_in_game)
             break;
-        if ((pressed & MENU_BUTTON(B)) && !menu_close_page() && s_in_game)
-            break;
+        if (pressed & MENU_BUTTON(B))
+        {
+            if (s_bt_confirm >= 0)
+            {
+                s_bt_confirm = -1;
+                menu_show("Canceled");
+                continue;
+            }
+            if (!menu_close_page() && s_in_game)
+                break;
+        }
         if ((pressed & MENU_BUTTON(X)) &&
                 s_items[s_cursor] >= MENU_ITEM_CONTROL_A &&
                 s_items[s_cursor] <= MENU_ITEM_CONTROL_FAST_FORWARD)
@@ -993,17 +1230,22 @@ enum gpsp_menu_result gpsp_menu_run(bool in_game)
             enum menu_item item = s_items[s_cursor];
 
             if (item == MENU_ITEM_SETTINGS || item == MENU_ITEM_CONTROLS ||
-                    item == MENU_ITEM_WIFI)
+                    item == MENU_ITEM_WIFI || item == MENU_ITEM_BT)
             {
                 menu_open_page(item == MENU_ITEM_SETTINGS ? MENU_PAGE_SETTINGS :
                         item == MENU_ITEM_CONTROLS ? MENU_PAGE_CONTROLS :
-                        MENU_PAGE_WIFI);
+                        item == MENU_ITEM_WIFI ? MENU_PAGE_WIFI : MENU_PAGE_BT);
                 continue;
             }
             if (item == MENU_ITEM_MUTE)
             {
                 gpsp_board_audio_set_muted(!gpsp_board_audio_muted());
                 menu_redraw();
+                continue;
+            }
+            if (menu_item_page(item) == MENU_PAGE_BT)
+            {
+                menu_bt_action(item);
                 continue;
             }
             if (item >= MENU_ITEM_CONTROL_A &&
@@ -1146,6 +1388,7 @@ enum gpsp_menu_result gpsp_menu_run(bool in_game)
     }
 
     menu_wifi_close();
+    menu_bt_close();
     if (result != GPSP_MENU_RESUME)
         gpsp_ui_set_game(false);
     gpsp_board_ui_end();

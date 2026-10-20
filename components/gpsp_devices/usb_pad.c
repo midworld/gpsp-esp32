@@ -5,6 +5,8 @@
  */
 
 #include "gpsp_usb_pad.h"
+#include "gpsp_bt.h"
+#include "playstation_pad.h"
 #include "usb_bt.h"
 
 #include "sdkconfig.h"
@@ -265,59 +267,14 @@ static bool pad_decode_switch(const uint8_t *r, int len, unsigned *out)
     return true;
 }
 
-/* Hat switch: 0 is up, then clockwise in eighths; 8 and above is none. */
-static void pad_decode_hat(unsigned hat, unsigned *out)
-{
-    if (hat > 7)
-        return;
-    pad_set(out, hat == 7 || hat <= 1, RETRO_DEVICE_ID_JOYPAD_UP);
-    pad_set(out, hat >= 1 && hat <= 3, RETRO_DEVICE_ID_JOYPAD_RIGHT);
-    pad_set(out, hat >= 3 && hat <= 5, RETRO_DEVICE_ID_JOYPAD_DOWN);
-    pad_set(out, hat >= 5, RETRO_DEVICE_ID_JOYPAD_LEFT);
-}
-
-/* PlayStation pads: face buttons and the hat share one byte, then the
-   shoulder byte, then PS. Cross is bottom (B), Circle right (A). */
-static void pad_decode_playstation(const uint8_t *r, unsigned *out)
-{
-    pad_decode_hat(r[0] & 0x0f, out);
-    pad_set(out, r[0] & 0x10, RETRO_DEVICE_ID_JOYPAD_Y);
-    pad_set(out, r[0] & 0x20, RETRO_DEVICE_ID_JOYPAD_B);
-    pad_set(out, r[0] & 0x40, RETRO_DEVICE_ID_JOYPAD_A);
-    pad_set(out, r[0] & 0x80, RETRO_DEVICE_ID_JOYPAD_X);
-    pad_set(out, r[1] & 0x01, RETRO_DEVICE_ID_JOYPAD_L);
-    pad_set(out, r[1] & 0x02, RETRO_DEVICE_ID_JOYPAD_R);
-    pad_set(out, r[1] & 0x04, RETRO_DEVICE_ID_JOYPAD_L2);
-    pad_set(out, r[1] & 0x08, RETRO_DEVICE_ID_JOYPAD_R2);
-    pad_set(out, r[1] & 0x10, RETRO_DEVICE_ID_JOYPAD_SELECT);
-    pad_set(out, r[1] & 0x20, RETRO_DEVICE_ID_JOYPAD_START);
-    pad_set(out, r[1] & 0x40, RETRO_DEVICE_ID_JOYPAD_L3);
-    pad_set(out, r[1] & 0x80, RETRO_DEVICE_ID_JOYPAD_R3);
-    pad_set(out, r[2] & 0x01, PAD_HOME_ID);
-}
-
-/* USB report 1: sticks, then the buttons from byte 5. */
 static bool pad_decode_ds4(const uint8_t *r, int len, unsigned *out)
 {
-    if (len < 8 || r[0] != 0x01)
-        return false;
-    /* The wireless adapter keeps reporting after the pad disconnects. */
-    if (len >= 32 && (r[31] & 0x04))
-    {
-        *out = 0;
-        return true;
-    }
-    pad_decode_playstation(r + 5, out);
-    return true;
+    return len >= 0 && gpsp_playstation_decode(r, len, false, false, out);
 }
 
-/* USB report 1: sticks, triggers and a counter, then the buttons. */
 static bool pad_decode_dualsense(const uint8_t *r, int len, unsigned *out)
 {
-    if (len < 11 || r[0] != 0x01)
-        return false;
-    pad_decode_playstation(r + 8, out);
-    return true;
+    return len >= 0 && gpsp_playstation_decode(r, len, true, false, out);
 }
 
 #if CONFIG_GPSP_USB_PAD_HID_DUMP
@@ -932,6 +889,7 @@ esp_err_t gpsp_usb_pad_init(void)
     if (s_lib_task)
         return ESP_OK;
 
+    gpsp_bt_init();
     atomic_store(&s_running, true);
     atomic_store(&s_buttons, 0);
     if (xTaskCreatePinnedToCore(pad_lib_task, "gpsp_usb_lib", 4096,
@@ -977,7 +935,7 @@ fail:
 
 uint32_t gpsp_usb_pad_read(void)
 {
-    return atomic_load(&s_buttons);
+    return atomic_load(&s_buttons) | gpsp_bt_read();
 }
 
 void gpsp_usb_pad_shutdown(void)

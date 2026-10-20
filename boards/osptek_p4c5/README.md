@@ -24,6 +24,8 @@
 - Touch and camera input are not implemented.
 - Ethernet is disabled; Wi-Fi uses the existing ESP-Hosted C5 firmware.
 - `CONFIG_GPSP_USB_BT` enables an external USB HCI host on demand.
+  The Bluedroid host has model checks only; pairing and input are not yet
+  verified on this board.
 
 | Function | P4 GPIO |
 | --- | --- |
