@@ -17,6 +17,7 @@
 #include "esp_async_color_convert.h"
 #endif
 #include "esp_cache.h"
+#include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_panel_io.h"
@@ -31,6 +32,8 @@
 #include "panels/dsi_panel.h"
 #include "dsi_hud.h"
 #include "dsi_overlay.h"
+#include "dsi_pad.h"
+#include "gpsp_touch.h"
 
 #define DSI_WIDTH 480
 #define DSI_HEIGHT 800
@@ -47,6 +50,7 @@ static esp_ldo_channel_handle_t s_power;
 static ppa_client_handle_t s_game_ppa;
 static ppa_client_handle_t s_ui_ppa;
 static ppa_client_handle_t s_overlay_ppa;
+static bool s_pad_borders[DSI_BUFFERS];
 static SemaphoreHandle_t s_frame_done;
 static void *s_frames[DSI_BUFFERS];
 static unsigned s_widths[DSI_BUFFERS];
@@ -249,6 +253,7 @@ static void dsi_diagnostics(bool ui, unsigned options, int64_t start,
 
 void gpsp_dsi_status(void)
 {
+    gpsp_dsi_pad_status();
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     struct dsi_diagnostics diag;
     bool ready;
@@ -434,6 +439,7 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
     cpu_rotate = !ui && !bilinear && s_copy;
 #endif
     unsigned offset_y = (DSI_HEIGHT - width * scale) / 2;
+    uint32_t pad = gpsp_touch_read();
     enum gpsp_display_stats stats = ui ? GPSP_DISPLAY_STATS_OFF : gpsp_dsi_stats_mode();
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     bool sample = !ui && ((s_profile_frames++ & 15) == 0);
@@ -488,6 +494,19 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
         }
         s_widths[s_next] = width;
     }
+    else if (s_pad_borders[s_next])
+    {
+        /* Controls reach into the black side borders, outside the next image. */
+        unsigned bytes = offset_y * DSI_WIDTH * sizeof(uint16_t);
+        uint8_t *frame = (uint8_t *)s_frames[s_next];
+        memset(frame, 0, bytes);
+        memset(frame + DSI_BYTES - bytes, 0, bytes);
+        ESP_RETURN_ON_ERROR(esp_cache_msync(frame, bytes,
+                ESP_CACHE_MSYNC_FLAG_DIR_C2M), TAG, "Pad border sync");
+        ESP_RETURN_ON_ERROR(esp_cache_msync(frame + DSI_BYTES - bytes, bytes,
+                ESP_CACHE_MSYNC_FLAG_DIR_C2M), TAG, "Pad border sync");
+    }
+    s_pad_borders[s_next] = (pad & GPSP_VIRTUAL_PAD_VISIBLE) != 0;
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     if (sample)
         ppa_start = esp_timer_get_time();
@@ -563,6 +582,15 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
     if (sample)
         expand_end = esp_timer_get_time();
 #endif
+    esp_err_t pad_result = gpsp_dsi_pad_draw(s_frames[s_next], pad);
+    if (pad_result != ESP_OK)
+    {
+        gpsp_touch_set_enabled(false);
+        ESP_LOGW(TAG, "Virtual pad disabled: %s", esp_err_to_name(pad_result));
+    }
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    int64_t pad_end = sample ? esp_timer_get_time() : 0;
+#endif
     if (stats != GPSP_DISPLAY_STATS_OFF)
     {
         esp_err_t overlay = gpsp_dsi_hud_draw(s_frames[s_next], stats);
@@ -585,7 +613,7 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
                 (unsigned)(expand_end - ppa_end),
                 (unsigned)(esp_timer_get_time() - hud_end),
                 stats != GPSP_DISPLAY_STATS_OFF ?
-                (unsigned)(hud_end - expand_end) : 0, copy_us);
+                (unsigned)(hud_end - pad_end) : 0, copy_us);
     dsi_diagnostics(ui, (unsigned)filter | ((unsigned)color << 8),
             start, rendered, result);
 #endif
@@ -683,6 +711,7 @@ esp_err_t gpsp_dsi_init(void)
 #endif
     DSI_TRY(esp_lcd_panel_init(s_panel));
     memset(s_widths, 0, sizeof(s_widths));
+    memset(s_pad_borders, 0, sizeof(s_pad_borders));
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     DSI_TRY(dsi_overlay_check());
     memset(&s_diag, 0, sizeof(s_diag));
@@ -726,6 +755,7 @@ void gpsp_dsi_shutdown(void)
 {
     s_ready = false;
     gpsp_dsi_hud_shutdown();
+    gpsp_dsi_pad_shutdown();
 #if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
     dsi_copy_shutdown();
 #endif

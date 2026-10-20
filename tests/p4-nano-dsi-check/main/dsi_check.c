@@ -11,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include "gpsp_lcd.h"
 #include "gpsp_i2c.h"
+#include "libretro.h"
 /* Inspect output buffers without adding a firmware diagnostic API. */
 #include "../../../components/gpsp_video/dsi.c"
 
@@ -27,6 +28,24 @@ void display_model_dma_check(void);
 #endif
 #endif
 void display_settings_check(uint16_t *ui);
+static uint32_t s_test_touch;
+uint32_t gpsp_touch_read(void) { return s_test_touch; }
+void gpsp_touch_set_enabled(bool enabled)
+{
+    s_test_touch = enabled ? GPSP_VIRTUAL_PAD_VISIBLE : 0;
+}
+
+static bool in_pad_region(unsigned x, unsigned y)
+{
+    for (unsigned i = 0; i < GPSP_PAD_REGIONS; i++)
+    {
+        const struct gpsp_pad_rect *r = &gpsp_pad_rects[i];
+        if (x >= r->x && x < r->x + r->width &&
+                y >= r->y && y < r->y + r->height)
+            return true;
+    }
+    return false;
+}
 
 #if CONFIG_GPSP_LCD_DSI_SIMD
 static uint16_t shade_reference(uint16_t p)
@@ -126,6 +145,90 @@ static uint16_t landscape_pixel(const uint16_t *pixels, unsigned x, unsigned y)
 #else
     return pixels[(DSI_HEIGHT - 1 - x) * DSI_WIDTH + y];
 #endif
+}
+
+static int compare_time(const void *a, const void *b)
+{
+    unsigned x = *(const unsigned *)a, y = *(const unsigned *)b;
+    return (x > y) - (x < y);
+}
+
+static void check_virtual_pad(uint16_t *input, uint16_t *ui)
+{
+    uint16_t *baseline = heap_caps_malloc(DSI_BYTES, MALLOC_CAP_SPIRAM);
+    assert(baseline);
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_OFF);
+    gpsp_dsi_set_options(GPSP_DISPLAY_NEAREST, GPSP_DISPLAY_COLOR_NONE);
+    for (unsigned mode = 0; mode < 2; mode++)
+    {
+        bool is_ui = mode != 0;
+        const uint16_t *source = is_ui ? ui : input;
+        s_test_touch = 0;
+        ESP_ERROR_CHECK(gpsp_dsi_draw(source, is_ui));
+        memcpy(baseline, last_frame(), DSI_BYTES);
+        s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE;
+        for (unsigned held = 0; held < 2; held++)
+        {
+            s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE | (held ?
+                    (1u << RETRO_DEVICE_ID_JOYPAD_UP) |
+                    (1u << RETRO_DEVICE_ID_JOYPAD_A) : 0);
+            ESP_ERROR_CHECK(gpsp_dsi_draw(source, is_ui));
+            const uint16_t *shown = last_frame();
+            assert(landscape_pixel(shown, 0, 346) != 0);
+            assert(landscape_pixel(shown, 799, 306) != 0);
+            for (unsigned y = 0; y < 480; y++)
+                for (unsigned x = 0; x < 800; x++)
+                    if (!in_pad_region(x, y))
+                        assert(landscape_pixel(shown, x, y) ==
+                                landscape_pixel(baseline, x, y));
+        }
+        s_test_touch = 0;
+        for (unsigned i = 0; i < DSI_BUFFERS + 1; i++)
+        {
+            ESP_ERROR_CHECK(gpsp_dsi_draw(source, is_ui));
+            assert(memcmp(baseline, last_frame(), DSI_BYTES) == 0);
+        }
+    }
+    /* A static menu still refreshes controls without editing its canvas. */
+    gpsp_lcd_ui_draw(0, 240);
+    memcpy(baseline, last_frame(), DSI_BYTES);
+    for (unsigned enabled = 1; ; enabled--)
+    {
+        unsigned next = s_next;
+        s_test_touch = enabled ? GPSP_VIRTUAL_PAD_VISIBLE : 0;
+        gpsp_lcd_overlay_changed();
+        for (unsigned wait = 0; s_next == next && wait < 1000; wait++)
+            vTaskDelay(1);
+        assert(s_next != next);
+        if (!enabled)
+        {
+            assert(memcmp(baseline, last_frame(), DSI_BYTES) == 0);
+            break;
+        }
+        assert(landscape_pixel(last_frame(), 0, 346) != 0);
+    }
+    unsigned idle[100], changing[100];
+    for (unsigned pass = 0; pass < 2; pass++)
+        for (unsigned i = 0; i < 110; i++)
+        {
+            unsigned state = GPSP_VIRTUAL_PAD_VISIBLE;
+            if (pass && (i & 1))
+                state |= (1u << RETRO_DEVICE_ID_JOYPAD_UP) |
+                        (1u << RETRO_DEVICE_ID_JOYPAD_A);
+            int64_t start = esp_timer_get_time();
+            ESP_ERROR_CHECK(gpsp_dsi_pad_draw(s_frames[s_next], state));
+            if (i >= 10)
+                (pass ? changing : idle)[i - 10] = esp_timer_get_time() - start;
+        }
+    qsort(idle, 100, sizeof(unsigned), compare_time);
+    /* The timing probe also wrote controls into the next scanout buffer. */
+    s_pad_borders[s_next] = true;
+    qsort(changing, 100, sizeof(unsigned), compare_time);
+    printf("DSI_CHECK PAD us idle p50=%u p95=%u p99=%u max=%u "
+            "changing p50=%u p95=%u p99=%u max=%u\n", idle[49], idle[94],
+            idle[98], idle[99], changing[49], changing[94], changing[98], changing[99]);
+    heap_caps_free(baseline);
+    puts("DSI_CHECK virtual pad: game/UI bounds, border cleanup, idle UI refresh pass");
 }
 
 static void check_stats(uint16_t *input, uint16_t *ui)
@@ -469,6 +572,7 @@ static void display_check(void *arg)
     }
     check_effects(input, ui);
     check_stats(input, ui);
+    check_virtual_pad(input, ui);
     fill(input, 240, 160);
 #if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
 #if CONFIG_DSI_CHECK_MODEL

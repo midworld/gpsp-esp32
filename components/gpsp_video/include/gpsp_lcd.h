@@ -59,5 +59,9 @@ void gpsp_lcd_ui_end(void);
 #endif
 
 void gpsp_lcd_shutdown(void);
+#if CONFIG_GPSP_LCD_DSI
+/* Wake the display worker after a touch overlay change. */
+void gpsp_lcd_overlay_changed(void);
+#endif
 
 #endif /* GPSP_LCD_H */

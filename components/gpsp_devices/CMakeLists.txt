@@ -16,6 +16,7 @@ else()
 
     idf_component_register(
         SRCS "audio_es8311.c" "i2c_bus.c" "network.c" "usb_pad.c" "sdmmc.c"
+            "touch_st7123.c" "virtual_pad.c"
             "playstation_pad.c" "bt_pad.c" "usb_bt.c" "usb_bt_packet.c"
             "hid_gamepad.cc" "third_party/hid_report_parser/hid_report_parser.cpp"
             "$ENV{GPSP_BOARD_DIR}/board.c"

@@ -1380,11 +1380,12 @@ static bool gpsp_menu_requested(uint32_t input)
 
 static void gpsp_input_poll(void)
 {
-    uint32_t input = gpsp_board_input_read();
+    uint32_t input = gpsp_board_input_read_physical();
+    uint32_t touch = gpsp_board_virtual_input();
 
 #if CONFIG_GPSP_MENU
     /* The menu opens after this frame, which already sees no buttons. */
-    if (gpsp_menu_requested(input))
+    if (gpsp_menu_requested(input | touch))
     {
 #if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
         ESP_LOGI(TAG, "Menu requested input=0x%05x", (unsigned)input);
@@ -1395,8 +1396,8 @@ static void gpsp_input_poll(void)
         s_fast_forward = false;
 #endif
     }
-    if (s_input_blocked && input)
-        input = 0;
+    if (s_input_blocked && (input | touch))
+        input = touch = 0;
     else
         s_input_blocked = false;
 #endif
@@ -1406,6 +1407,7 @@ static void gpsp_input_poll(void)
 #if GPSP_FRAMESKIP
     input = gpsp_input_map(input);
 #endif
+    input |= touch;
     s_input_state = (uint16_t)input;
 }
 

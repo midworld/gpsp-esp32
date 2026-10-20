@@ -11,6 +11,7 @@ const struct gpsp_hardware gpsp_hardware = {
     .audio = {0x18, 53, 13, 12, 10, 9},
     .spi = {-1, -1, -1, -1, -1, -1, -1},
     .dsi = {5, 20},
+    .touch = {0x55},
     .ethernet = {
         .enabled = false,
     },

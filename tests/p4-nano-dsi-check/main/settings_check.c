@@ -14,6 +14,8 @@ static bool display_available = true;
 static char saved_filter[16];
 static char saved_color[16];
 static char saved_stats[16];
+static char saved_pad[8];
+static bool touch_available, virtual_pad;
 static unsigned config_writes;
 static bool save_ok = true;
 static int state_slot = GPSP_STATE_AUTO;
@@ -34,6 +36,9 @@ void gpsp_board_set_display_options(enum gpsp_display_filter filter,
 
 enum gpsp_display_stats gpsp_board_stats(void) { return gpsp_dsi_stats_mode(); }
 void gpsp_board_set_stats(enum gpsp_display_stats mode) { gpsp_dsi_set_stats(mode); }
+bool gpsp_board_virtual_pad_available(void) { return touch_available; }
+bool gpsp_board_virtual_pad_enabled(void) { return virtual_pad; }
+void gpsp_board_set_virtual_pad(bool enabled) { virtual_pad = touch_available && enabled; }
 
 int gpsp_board_audio_volume_step(int step) { (void)step; return INT_MIN; }
 bool gpsp_board_audio_muted(void) { return false; }
@@ -57,7 +62,8 @@ bool gpsp_storage_config(const char *key, char *value, size_t size)
 {
     const char *saved = !strcmp(key, "display_filter") ? saved_filter :
             !strcmp(key, "display_color") ? saved_color :
-            !strcmp(key, "display_stats") ? saved_stats : "";
+            !strcmp(key, "display_stats") ? saved_stats :
+            !strcmp(key, "virtual_pad") ? saved_pad : "";
 
     snprintf(value, size, "%s", saved);
     return saved[0] != '\0';
@@ -75,6 +81,8 @@ bool gpsp_storage_config_set(const struct gpsp_storage_setting *items, size_t co
             snprintf(saved_color, sizeof(saved_color), "%s", items[i].value);
         else if (!strcmp(items[i].key, "display_stats"))
             snprintf(saved_stats, sizeof(saved_stats), "%s", items[i].value);
+        else if (!strcmp(items[i].key, "virtual_pad"))
+            snprintf(saved_pad, sizeof(saved_pad), "%s", items[i].value);
         else
             assert(false);
     }
@@ -185,5 +193,33 @@ void display_settings_check(uint16_t *ui)
     assert(gpsp_settings_display_filter() == GPSP_DISPLAY_NEAREST);
     assert(gpsp_settings_display_color() == GPSP_DISPLAY_COLOR_NONE);
     assert(gpsp_settings_stats() == GPSP_DISPLAY_STATS_OFF);
-    puts("DSI_CHECK settings/menu pass");
+    touch_available = true;
+    menu_build_items();
+    int pad_index = -1;
+    for (int i = 0; i < s_item_count; i++)
+        if (s_items[i] == MENU_ITEM_VIRTUAL_PAD)
+            pad_index = i;
+    assert(pad_index >= 0);
+    s_cursor = pad_index;
+    menu_direction(MENU_BUTTON(RIGHT));
+    assert(virtual_pad);
+    assert(menu_item_value(MENU_ITEM_VIRTUAL_PAD, value, sizeof(value)));
+    assert(!strcmp(value, "< On >"));
+    gpsp_settings_save();
+    assert(!strcmp(saved_pad, "on"));
+    virtual_pad = false;
+    gpsp_settings_load();
+    assert(virtual_pad);
+    menu_direction(MENU_BUTTON(LEFT));
+    assert(!virtual_pad);
+    gpsp_settings_save();
+    assert(!strcmp(saved_pad, "off"));
+    snprintf(saved_pad, sizeof(saved_pad), "invalid");
+    gpsp_settings_load();
+    assert(!virtual_pad);
+    touch_available = false;
+    menu_build_items();
+    for (int i = 0; i < s_item_count; i++)
+        assert(s_items[i] != MENU_ITEM_VIRTUAL_PAD);
+    puts("DSI_CHECK settings/menu and Virtual Pad persistence pass");
 }

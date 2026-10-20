@@ -90,6 +90,12 @@ void gpsp_board_set_stats(enum gpsp_display_stats mode);
  *         plus GPSP_BOARD_INPUT_HOME.
  */
 uint32_t gpsp_board_input_read(void);
+/* Gameplay maps physical buttons before merging the fixed touch buttons. */
+uint32_t gpsp_board_input_read_physical(void);
+uint32_t gpsp_board_virtual_input(void);
+bool gpsp_board_virtual_pad_available(void);
+bool gpsp_board_virtual_pad_enabled(void);
+void gpsp_board_set_virtual_pad(bool enabled);
 
 #if CONFIG_GPSP_MENU
 /* Full-screen UI while the game is paused. */

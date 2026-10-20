@@ -15,6 +15,7 @@
  *   display_filter=nearest|bilinear|lcd_grid
  *   display_color=none|gba      DSI game output only
  *   display_stats=off|simple|full  DSI game statistics overlay
+ *   virtual_pad=off|on          touch controls, double-tap to enable
  *   last_rom=<name>             the ROM last started, for the game list
  *   wifi_ssid=<name>            the Wi-Fi network the menu joins
  *   wifi_password=<text>        its password, as plain text
@@ -64,6 +65,7 @@ struct gpsp_settings
     enum gpsp_display_filter display_filter;
     enum gpsp_display_color display_color;
     enum gpsp_display_stats display_stats;
+    bool virtual_pad;
 };
 
 static const char *const s_filter_keys[GPSP_DISPLAY_FILTER_COUNT] = {
@@ -175,6 +177,7 @@ static void gpsp_settings_current(struct gpsp_settings *settings)
     gpsp_board_display_options(&settings->display_filter,
             &settings->display_color);
     settings->display_stats = gpsp_board_stats();
+    settings->virtual_pad = gpsp_board_virtual_pad_enabled();
 }
 
 /* Parse a button name; leave the value unchanged for unknown names. */
@@ -300,6 +303,10 @@ void gpsp_settings_load(void)
         gpsp_settings_set_stats(stats);
     }
 
+    bool virtual_pad = false;
+    gpsp_settings_switch("virtual_pad", &virtual_pad);
+    gpsp_board_set_virtual_pad(virtual_pad);
+
     gpsp_settings_current(&s_saved);
     ESP_LOGI(TAG, "Settings: frameskip=%d threshold=%u%% volume=%d mute=%d slot=%d "
             "auto_save=%d auto_load=%d fast_forward=%ux%s", s_saved.frameskip,
@@ -310,7 +317,7 @@ void gpsp_settings_load(void)
 
 void gpsp_settings_save(void)
 {
-    struct gpsp_storage_setting settings[13 + GPSP_SETTINGS_CONTROL_COUNT];
+    struct gpsp_storage_setting settings[14 + GPSP_SETTINGS_CONTROL_COUNT];
     char controls[GPSP_SETTINGS_CONTROL_COUNT][8];
     char speed[4];
     char frameskip[8];
@@ -396,6 +403,10 @@ void gpsp_settings_save(void)
             settings[count++] = (struct gpsp_storage_setting){
                 "display_stats", s_stats_keys[now.display_stats] };
     }
+
+    if (gpsp_board_virtual_pad_available() && now.virtual_pad != s_saved.virtual_pad)
+        settings[count++] = (struct gpsp_storage_setting){
+            "virtual_pad", now.virtual_pad ? "on" : "off" };
 
     /* Without a card the settings last until power off. */
     if (count && gpsp_storage_config_set(settings, count))

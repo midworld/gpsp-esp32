@@ -12,6 +12,7 @@
 #if CONFIG_GPSP_LCD
 
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -110,11 +111,17 @@ static volatile int s_frameskip;
 static SemaphoreHandle_t s_draw_lock;
 /* Last buffer sent to the panel, or -1. */
 static int s_last = -1;
+#if CONFIG_GPSP_LCD_DSI
+static atomic_uint s_overlay_revision;
+#endif
 #if CONFIG_GPSP_MENU
 #if CONFIG_GPSP_LCD_DSI
 static SemaphoreHandle_t s_ui_done;
 /* Protected by s_lock; UI calls wait until the CPU1 worker finishes. */
 static bool s_ui_pending;
+static uint16_t *s_ui_cached;
+static bool s_ui_cached_valid;
+static unsigned s_overlay_drawn;
 #endif
 /* The UI canvas is centered on the panel; a smaller panel crops it. */
 #define LCD_UI_WIDTH 320
@@ -342,12 +349,15 @@ static void gpsp_lcd_task(void *arg)
         for (;;)
         {
 #if CONFIG_GPSP_MENU && CONFIG_GPSP_LCD_DSI
-            bool ui_frame;
+            bool ui_frame, ui_refresh;
+            unsigned overlay_revision = atomic_load(&s_overlay_revision);
 #endif
             xSemaphoreTake(s_draw_lock, portMAX_DELAY);
             portENTER_CRITICAL(&s_lock);
 #if CONFIG_GPSP_MENU && CONFIG_GPSP_LCD_DSI
             ui_frame = s_ui && s_ui_pending;
+            ui_refresh = s_ui && s_ui_cached_valid &&
+                    overlay_revision != s_overlay_drawn;
             s_ui_pending = false;
 #endif
 #if CONFIG_GPSP_MENU
@@ -359,11 +369,19 @@ static void gpsp_lcd_task(void *arg)
                 s_state[index] = LCD_BUFFER_SENDING;
             portEXIT_CRITICAL(&s_lock);
 #if CONFIG_GPSP_MENU && CONFIG_GPSP_LCD_DSI
-            if (ui_frame)
+            if (ui_frame || ui_refresh)
             {
+                /* The UI caller waits for ui_frame; touch redraws use this copy. */
+                if (ui_frame)
+                {
+                    memcpy(s_ui_cached, s_ui_pixels, LCD_UI_BYTES);
+                    s_ui_cached_valid = true;
+                }
                 if (!s_stop)
-                    gpsp_dsi_draw(s_ui_pixels, true);
-                xSemaphoreGive(s_ui_done);
+                    gpsp_dsi_draw(s_ui_cached, true);
+                s_overlay_drawn = overlay_revision;
+                if (ui_frame)
+                    xSemaphoreGive(s_ui_done);
                 xSemaphoreGive(s_draw_lock);
                 continue;
             }
@@ -400,6 +418,15 @@ static void gpsp_lcd_task(void *arg)
     s_task = NULL;
     vTaskDelete(NULL);
 }
+
+#if CONFIG_GPSP_LCD_DSI
+void gpsp_lcd_overlay_changed(void)
+{
+    atomic_fetch_add(&s_overlay_revision, 1);
+    if (s_task)
+        xTaskNotifyGive(s_task);
+}
+#endif
 
 esp_err_t gpsp_lcd_init(void)
 {
@@ -615,9 +642,19 @@ bool gpsp_lcd_ui_begin(uint16_t **pixels, const uint16_t **frame)
                 MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
     if (!s_ui_pixels)
         return false;
+#if CONFIG_GPSP_LCD_DSI
+    if (!s_ui_cached)
+        s_ui_cached = heap_caps_aligned_alloc(64, LCD_UI_BYTES,
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    if (!s_ui_cached)
+        return false;
+#endif
 
     portENTER_CRITICAL(&s_lock);
     s_ui = true;
+#if CONFIG_GPSP_LCD_DSI
+    s_ui_cached_valid = false;
+#endif
     portEXIT_CRITICAL(&s_lock);
     /* Waits for a frame on the display; the task then sends no more. */
     xSemaphoreTake(s_draw_lock, portMAX_DELAY);
@@ -729,6 +766,9 @@ void gpsp_lcd_shutdown(void)
     s_ui = false;
 #if CONFIG_GPSP_LCD_DSI
     s_ui_pending = false;
+    heap_caps_free(s_ui_cached);
+    s_ui_cached = NULL;
+    s_ui_cached_valid = false;
     if (s_ui_done)
     {
         vSemaphoreDelete(s_ui_done);

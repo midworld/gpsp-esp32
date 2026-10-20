@@ -9,6 +9,10 @@
   save/reload with an in-memory config store.
 - Checks Stats Off/Simple/Full, legacy `on` settings, the FPS/speed-only
   top-right box, unchanged pixels outside it, immediate switching, and UI exclusion.
+- Checks virtual pad game/UI bounds, pressed states, border cleanup after Off,
+  static-menu refresh, and setting persistence. Touch contacts are synthetic;
+  physical touch needs a separate check. Pad timing excludes initial cache creation
+  and reports p50/p95/p99/max for steady and changing button states.
 - Runs display checks on CPU1; UI retains PPA processing.
 - Previous OSPTEK P4 v3.2 hardware checks passed with PIE enabled:
   exact nearest/grid pixels,

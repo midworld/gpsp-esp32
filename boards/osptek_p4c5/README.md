@@ -21,7 +21,15 @@
   with CPU1 PIE transposes. OSPTEK enables it with 8-row tiles by default.
   It reuses tile storage; bilinear and UI retain PPA.
 - Asterix state 0 measurements: [integer scaling](../../docs/benchmark.md#asterix-state-0).
-- Touch and camera input are not implemented.
+- ST7123 touch: shared I2C, address 0x55, CPU1 polling every 8 ms.
+- Virtual Pad: Off/On in Settings; double-tap the screen while Off to enable.
+  D-pad, A/B, L/R, Start, Select, and Menu also operate the existing menus.
+  Physical control mappings do not change the touch button functions.
+- Controls use cached PSRAM tiles and PPA blending before Stats.
+  Normal/pressed artwork and working tiles use 1.37 MiB on first use.
+  The touch worker uses a 3 KiB stack; there are no new SRAM framebuffers.
+  DSI diagnostics include blend and cache-build times under `PAD profile`.
+- Camera input is not implemented.
 - Ethernet is disabled; Wi-Fi uses the existing ESP-Hosted C5 firmware.
 - `CONFIG_GPSP_USB_BT` enables an external USB HCI host on demand.
   The Bluedroid host has model checks only; pairing and input are not yet

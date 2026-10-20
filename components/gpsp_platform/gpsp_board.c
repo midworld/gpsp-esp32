@@ -21,6 +21,7 @@
 #endif
 #if CONFIG_GPSP_LCD_DSI
 #include "gpsp_lcd_dsi.h"
+#include "gpsp_touch.h"
 #endif
 #if CONFIG_GPSP_AUDIO
 #include "gpsp_audio.h"
@@ -87,6 +88,9 @@ esp_err_t gpsp_board_init(void)
 #if CONFIG_GPSP_USB_PAD
     /* Other input sources still work without USB. */
     gpsp_usb_pad_init();
+#endif
+#if CONFIG_GPSP_LCD_DSI
+    gpsp_touch_init(gpsp_lcd_overlay_changed);
 #endif
 #if CONFIG_GPSP_STATUS
     gpsp_status_start();
@@ -205,7 +209,7 @@ void gpsp_board_set_stats(enum gpsp_display_stats mode)
 #endif
 }
 
-uint32_t gpsp_board_input_read(void)
+uint32_t gpsp_board_input_read_physical(void)
 {
     uint32_t input = gpsp_espemu_transport_read_input();
 
@@ -222,6 +226,47 @@ uint32_t gpsp_board_input_read(void)
     input |= gpsp_usb_pad_read();
 #endif
     return input;
+}
+
+uint32_t gpsp_board_virtual_input(void)
+{
+#if CONFIG_GPSP_LCD_DSI
+    return gpsp_touch_read() & 0x1ffff;
+#else
+    return 0;
+#endif
+}
+
+uint32_t gpsp_board_input_read(void)
+{
+    return gpsp_board_input_read_physical() | gpsp_board_virtual_input();
+}
+
+bool gpsp_board_virtual_pad_available(void)
+{
+#if CONFIG_GPSP_LCD_DSI
+    return gpsp_touch_available();
+#else
+    return false;
+#endif
+}
+
+bool gpsp_board_virtual_pad_enabled(void)
+{
+#if CONFIG_GPSP_LCD_DSI
+    return gpsp_touch_enabled();
+#else
+    return false;
+#endif
+}
+
+void gpsp_board_set_virtual_pad(bool enabled)
+{
+#if CONFIG_GPSP_LCD_DSI
+    gpsp_touch_set_enabled(enabled);
+#else
+    (void)enabled;
+#endif
 }
 
 #if CONFIG_GPSP_MENU && CONFIG_ESPEMU
@@ -293,6 +338,9 @@ void gpsp_board_wifi_close(void)
 #elif CONFIG_GPSP_MENU
 bool gpsp_board_ui_begin(uint16_t **pixels, const uint16_t **frame)
 {
+#if CONFIG_GPSP_LCD_DSI
+    gpsp_touch_cancel();
+#endif
     return gpsp_lcd_ui_begin(pixels, frame);
 }
 
@@ -303,6 +351,9 @@ void gpsp_board_ui_draw(unsigned y0, unsigned y1)
 
 void gpsp_board_ui_end(void)
 {
+#if CONFIG_GPSP_LCD_DSI
+    gpsp_touch_cancel();
+#endif
     gpsp_lcd_ui_end();
 }
 
@@ -444,6 +495,9 @@ void gpsp_board_audio_set_muted(bool muted)
 
 void gpsp_board_shutdown(void)
 {
+#if CONFIG_GPSP_LCD_DSI
+    gpsp_touch_shutdown();
+#endif
 #if CONFIG_GPSP_SERIAL_INPUT
     /* Stop commands before the services they use. */
     gpsp_serial_input_stop();

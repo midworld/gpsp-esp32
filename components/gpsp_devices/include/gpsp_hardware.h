@@ -14,6 +14,7 @@ struct gpsp_hardware
     struct { int address, amplifier, mclk, bclk, ws, dout; } audio;
     struct { int host, sclk, mosi, cs, dc, reset, backlight; } spi;
     struct { int reset, backlight; } dsi;
+    struct { int address; } touch;
     struct
     {
         bool enabled;

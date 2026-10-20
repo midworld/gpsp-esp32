@@ -113,6 +113,7 @@ enum menu_item
     MENU_ITEM_DISPLAY,
     MENU_ITEM_COLOR,
     MENU_ITEM_STATS,
+    MENU_ITEM_VIRTUAL_PAD,
     MENU_ITEM_AUTO_SAVE,
     MENU_ITEM_AUTO_LOAD,
     MENU_ITEM_CONTROLS,
@@ -161,6 +162,7 @@ static const char *const s_item_names[MENU_ITEM_COUNT] = {
     [MENU_ITEM_DISPLAY] = "Display",
     [MENU_ITEM_COLOR] = "Colors",
     [MENU_ITEM_STATS] = "Stats",
+    [MENU_ITEM_VIRTUAL_PAD] = "Virtual Pad",
     [MENU_ITEM_AUTO_SAVE] = "Auto Save",
     [MENU_ITEM_AUTO_LOAD] = "Auto Load",
     [MENU_ITEM_TRANSFER] = "File Transfer",
@@ -342,6 +344,8 @@ static bool menu_item_value(enum menu_item item, char *value, size_t size)
 
         snprintf(value, size, "< %s >", names[gpsp_settings_display_filter()]);
     }
+    else if (item == MENU_ITEM_VIRTUAL_PAD)
+        snprintf(value, size, gpsp_board_virtual_pad_enabled() ? "< On >" : "< Off >");
     else if (item == MENU_ITEM_COLOR)
         snprintf(value, size, gpsp_settings_display_color() ==
                 GPSP_DISPLAY_COLOR_GBA ? "< GBA LCD >" : "< None >");
@@ -560,6 +564,7 @@ static void menu_build_items(void)
                 (i != MENU_ITEM_BT || bt.state != GPSP_BT_DISABLED) &&
                 ((i != MENU_ITEM_DISPLAY && i != MENU_ITEM_COLOR &&
                         i != MENU_ITEM_STATS) || display) &&
+                (i != MENU_ITEM_VIRTUAL_PAD || gpsp_board_virtual_pad_available()) &&
                 (i != MENU_ITEM_THRESHOLD || automatic) &&
                 (i != MENU_ITEM_GAME_LIST || s_game_list) &&
                 (i != MENU_ITEM_TRANSFER || s_card) &&
@@ -646,6 +651,8 @@ static void menu_direction(uint32_t buttons)
         gpsp_settings_set_display(filter % GPSP_DISPLAY_FILTER_COUNT,
                 gpsp_settings_display_color());
     }
+    else if (s_items[s_cursor] == MENU_ITEM_VIRTUAL_PAD)
+        gpsp_board_set_virtual_pad(!gpsp_board_virtual_pad_enabled());
     else if (s_items[s_cursor] == MENU_ITEM_COLOR)
         gpsp_settings_set_display(gpsp_settings_display_filter(),
                 gpsp_settings_display_color() == GPSP_DISPLAY_COLOR_NONE ?
