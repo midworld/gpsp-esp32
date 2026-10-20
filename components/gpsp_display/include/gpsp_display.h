@@ -25,6 +25,14 @@ enum gpsp_display_color
     GPSP_DISPLAY_COLOR_COUNT,
 };
 
+enum gpsp_display_stats
+{
+    GPSP_DISPLAY_STATS_OFF,
+    GPSP_DISPLAY_STATS_SIMPLE,
+    GPSP_DISPLAY_STATS_FULL,
+    GPSP_DISPLAY_STATS_COUNT,
+};
+
 #define GPSP_DISPLAY_LUT_SIZE 65536
 
 /* Build the approximate GBA LCD profile for every RGB565 input. */

@@ -32,8 +32,8 @@ bool gpsp_board_display_options(enum gpsp_display_filter *filter,
 }
 void gpsp_board_set_display_options(enum gpsp_display_filter filter,
         enum gpsp_display_color color) { (void)filter; (void)color; }
-bool gpsp_board_stats(void) { return false; }
-void gpsp_board_set_stats(bool enabled) { (void)enabled; }
+enum gpsp_display_stats gpsp_board_stats(void) { return GPSP_DISPLAY_STATS_OFF; }
+void gpsp_board_set_stats(enum gpsp_display_stats mode) { (void)mode; }
 void gpsp_board_ui_draw(unsigned y0, unsigned y1) { (void)y0; (void)y1; }
 int gpsp_state_slot(void) { return slot; }
 void gpsp_state_select(int value) { slot = value; }

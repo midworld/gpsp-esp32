@@ -7,6 +7,8 @@
 - Checks exact nearest pixels, grid placement, color-profile samples,
   unchanged UI colors, menu visibility, left/right cycling, and settings
   save/reload with an in-memory config store.
+- Checks Stats Off/Simple/Full, legacy `on` settings, the FPS/speed-only
+  top-right box, unchanged pixels outside it, immediate switching, and UI exclusion.
 - Runs display checks on CPU1; UI retains PPA processing.
 - Previous OSPTEK P4 v3.2 hardware checks passed with PIE enabled:
   exact nearest/grid pixels,

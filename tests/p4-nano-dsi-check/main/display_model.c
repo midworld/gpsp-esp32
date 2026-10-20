@@ -37,6 +37,12 @@ static unsigned last_scale;
 static unsigned last_source_pixels;
 static unsigned last_core;
 static unsigned ppa_calls;
+static unsigned blend_calls;
+
+unsigned display_model_blend_calls(void)
+{
+    return blend_calls;
+}
 
 unsigned display_model_ppa_calls(void)
 {
@@ -370,6 +376,7 @@ esp_err_t __wrap_ppa_do_blend(ppa_client_handle_t handle,
         const ppa_blend_oper_config_t *op)
 {
     (void)handle;
+    blend_calls++;
     assert(op->in_bg.blend_cm == PPA_BLEND_COLOR_MODE_RGB565 &&
             op->in_fg.blend_cm == PPA_BLEND_COLOR_MODE_ARGB8888 &&
             op->out.blend_cm == PPA_BLEND_COLOR_MODE_RGB565);

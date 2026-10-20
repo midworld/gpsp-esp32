@@ -42,8 +42,8 @@ enum gpsp_display_filter gpsp_settings_display_filter(void);
 enum gpsp_display_color gpsp_settings_display_color(void);
 void gpsp_settings_set_display(enum gpsp_display_filter filter,
         enum gpsp_display_color color);
-bool gpsp_settings_stats(void);
-void gpsp_settings_set_stats(bool enabled);
+enum gpsp_display_stats gpsp_settings_stats(void);
+void gpsp_settings_set_stats(enum gpsp_display_stats mode);
 
 /* Functions a pad button can be given. Each has one button or none, and
    no two share one. The D-pad, Home and the menu's buttons stay fixed. */

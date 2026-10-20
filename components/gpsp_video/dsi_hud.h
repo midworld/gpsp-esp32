@@ -9,13 +9,14 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "lcd_status.h"
+#include "gpsp_display.h"
 
 void gpsp_dsi_hud_init(void);
 void gpsp_dsi_hud_shutdown(void);
 void gpsp_dsi_hud_update(const struct lcd_status_value *values);
-esp_err_t gpsp_dsi_hud_draw(uint16_t *frame);
+esp_err_t gpsp_dsi_hud_draw(uint16_t *frame, enum gpsp_display_stats mode);
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
-void gpsp_dsi_hud_sample(bool enabled, unsigned ppa, unsigned expand,
+void gpsp_dsi_hud_sample(enum gpsp_display_stats mode, unsigned ppa, unsigned expand,
         unsigned present, unsigned blend, unsigned copy);
 #endif
 

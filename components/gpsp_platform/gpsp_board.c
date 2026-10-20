@@ -187,21 +187,21 @@ void gpsp_board_set_display_options(enum gpsp_display_filter filter,
 #endif
 }
 
-bool gpsp_board_stats(void)
+enum gpsp_display_stats gpsp_board_stats(void)
 {
 #if CONFIG_GPSP_LCD_DSI
-    return gpsp_dsi_stats_enabled();
+    return gpsp_dsi_stats_mode();
 #else
-    return false;
+    return GPSP_DISPLAY_STATS_OFF;
 #endif
 }
 
-void gpsp_board_set_stats(bool enabled)
+void gpsp_board_set_stats(enum gpsp_display_stats mode)
 {
 #if CONFIG_GPSP_LCD_DSI
-    gpsp_dsi_set_stats(enabled);
+    gpsp_dsi_set_stats(mode);
 #else
-    (void)enabled;
+    (void)mode;
 #endif
 }
 

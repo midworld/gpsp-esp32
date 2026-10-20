@@ -434,7 +434,7 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
     cpu_rotate = !ui && !bilinear && s_copy;
 #endif
     unsigned offset_y = (DSI_HEIGHT - width * scale) / 2;
-    bool hud = !ui && gpsp_dsi_stats_enabled();
+    enum gpsp_display_stats stats = ui ? GPSP_DISPLAY_STATS_OFF : gpsp_dsi_stats_mode();
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     bool sample = !ui && ((s_profile_frames++ & 15) == 0);
     int64_t ppa_start = 0, ppa_end = 0, expand_end = 0, hud_end = 0;
@@ -563,13 +563,13 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
     if (sample)
         expand_end = esp_timer_get_time();
 #endif
-    if (hud)
+    if (stats != GPSP_DISPLAY_STATS_OFF)
     {
-        esp_err_t overlay = gpsp_dsi_hud_draw(s_frames[s_next]);
+        esp_err_t overlay = gpsp_dsi_hud_draw(s_frames[s_next], stats);
 
         if (overlay != ESP_OK)
         {
-            gpsp_dsi_set_stats(false);
+            gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_OFF);
             ESP_LOGW(TAG, "STAT blend disabled: %s", esp_err_to_name(overlay));
         }
     }
@@ -581,10 +581,11 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
     result = dsi_present();
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     if (sample && result == ESP_OK)
-        gpsp_dsi_hud_sample(hud, (unsigned)(ppa_end - ppa_start),
+        gpsp_dsi_hud_sample(stats, (unsigned)(ppa_end - ppa_start),
                 (unsigned)(expand_end - ppa_end),
                 (unsigned)(esp_timer_get_time() - hud_end),
-                hud ? (unsigned)(hud_end - expand_end) : 0, copy_us);
+                stats != GPSP_DISPLAY_STATS_OFF ?
+                (unsigned)(hud_end - expand_end) : 0, copy_us);
     dsi_diagnostics(ui, (unsigned)filter | ((unsigned)color << 8),
             start, rendered, result);
 #endif

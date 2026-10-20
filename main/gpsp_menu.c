@@ -160,7 +160,7 @@ static const char *const s_item_names[MENU_ITEM_COUNT] = {
     [MENU_ITEM_MUTE] = "Mute",
     [MENU_ITEM_DISPLAY] = "Display",
     [MENU_ITEM_COLOR] = "Colors",
-    [MENU_ITEM_STATS] = "STAT",
+    [MENU_ITEM_STATS] = "Stats",
     [MENU_ITEM_AUTO_SAVE] = "Auto Save",
     [MENU_ITEM_AUTO_LOAD] = "Auto Load",
     [MENU_ITEM_TRANSFER] = "File Transfer",
@@ -346,7 +346,13 @@ static bool menu_item_value(enum menu_item item, char *value, size_t size)
         snprintf(value, size, gpsp_settings_display_color() ==
                 GPSP_DISPLAY_COLOR_GBA ? "< GBA LCD >" : "< None >");
     else if (item == MENU_ITEM_STATS)
-        snprintf(value, size, gpsp_settings_stats() ? "< On >" : "< Off >");
+    {
+        const char *const names[GPSP_DISPLAY_STATS_COUNT] = {
+            "Off", "Simple", "Full",
+        };
+
+        snprintf(value, size, "< %s >", names[gpsp_settings_stats()]);
+    }
     else if (item == MENU_ITEM_SETTINGS || item == MENU_ITEM_CONTROLS ||
             item == MENU_ITEM_WIFI || item == MENU_ITEM_BT)
         snprintf(value, size, ">");
@@ -645,7 +651,12 @@ static void menu_direction(uint32_t buttons)
                 gpsp_settings_display_color() == GPSP_DISPLAY_COLOR_NONE ?
                 GPSP_DISPLAY_COLOR_GBA : GPSP_DISPLAY_COLOR_NONE);
     else if (s_items[s_cursor] == MENU_ITEM_STATS)
-        gpsp_settings_set_stats(!gpsp_settings_stats());
+    {
+        unsigned mode = gpsp_settings_stats();
+
+        mode += buttons & MENU_BUTTON(RIGHT) ? 1 : GPSP_DISPLAY_STATS_COUNT - 1;
+        gpsp_settings_set_stats(mode % GPSP_DISPLAY_STATS_COUNT);
+    }
     else if (s_items[s_cursor] == MENU_ITEM_FAST_FORWARD_SPEED)
     {
         /* Two speeds: either direction picks the other one. */

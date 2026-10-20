@@ -20,6 +20,7 @@ unsigned display_model_ppa_scale(void);
 unsigned display_model_ppa_source_pixels(void);
 unsigned display_model_ppa_core(void);
 unsigned display_model_ppa_calls(void);
+unsigned display_model_blend_calls(void);
 #if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
 void display_model_dma_fail_after(unsigned requests);
 void display_model_dma_check(void);
@@ -125,6 +126,90 @@ static uint16_t landscape_pixel(const uint16_t *pixels, unsigned x, unsigned y)
 #else
     return pixels[(DSI_HEIGHT - 1 - x) * DSI_WIDTH + y];
 #endif
+}
+
+static void check_stats(uint16_t *input, uint16_t *ui)
+{
+    const struct lcd_status_value values[LCD_FIELD_COUNT] = {
+        [LCD_FIELD_FPS] = {"59.7", 0x07e0},
+        [LCD_FIELD_SPEED] = {"100%", 0xf800},
+    };
+    uint16_t *full = heap_caps_malloc(DSI_BYTES, MALLOC_CAP_SPIRAM);
+
+    assert(full);
+    for (unsigned i = 0; i < 240 * 160; i++)
+        input[i] = 0xffff;
+    gpsp_dsi_set_options(GPSP_DISPLAY_NEAREST, GPSP_DISPLAY_COLOR_NONE);
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_FULL);
+    gpsp_dsi_hud_update(values);
+#if CONFIG_DSI_CHECK_MODEL
+    unsigned calls = display_model_blend_calls();
+#endif
+    ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+    memcpy(full, last_frame(), DSI_BYTES);
+#if CONFIG_DSI_CHECK_MODEL
+    assert(display_model_blend_calls() == calls + 2);
+#endif
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_SIMPLE);
+    /* Change geometry immediately, without waiting for another status update. */
+    ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+    const uint16_t *simple = last_frame();
+    unsigned fps = 0, speed = 0, background = 0;
+
+    for (unsigned y = 0; y < 480; y++)
+        for (unsigned x = 0; x < 800; x++)
+        {
+            uint16_t base = x >= 40 && x < 760 ? 0xffff : 0;
+            bool box = x >= 508 && x < 760 && y < 26;
+            uint16_t pixel = landscape_pixel(simple, x, y);
+
+            assert(pixel == (box ? landscape_pixel(full, x, y) : base));
+            if (box)
+            {
+                fps += pixel == 0x07e0;
+                speed += pixel == 0xf800;
+                background += pixel != base && pixel != 0x8410 &&
+                        pixel != 0x07e0 && pixel != 0xf800;
+            }
+            if (x < 40 || x >= 760 || (y >= 26 && y < 454))
+                assert(landscape_pixel(full, x, y) == base);
+        }
+    assert(fps && speed && background);
+#if CONFIG_DSI_CHECK_MODEL
+    assert(display_model_blend_calls() == calls + 3);
+#endif
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_FULL);
+    ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+    assert(!memcmp(full, last_frame(), DSI_BYTES));
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_OFF);
+#if CONFIG_DSI_CHECK_MODEL
+    calls = display_model_blend_calls();
+#endif
+    ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+    const uint16_t *off = last_frame();
+
+    for (unsigned y = 0; y < 480; y++)
+        for (unsigned x = 0; x < 800; x++)
+            assert(landscape_pixel(off, x, y) ==
+                    (x >= 40 && x < 760 ? 0xffff : 0));
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_FULL);
+    for (unsigned i = 0; i < 320 * 240; i++)
+        ui[i] = 0xffff;
+    gpsp_lcd_ui_draw(0, 240);
+    const uint16_t *menu = last_frame();
+
+    for (unsigned y = 0; y < 480; y++)
+        for (unsigned x = 0; x < 800; x++)
+            assert(landscape_pixel(menu, x, y) ==
+                    (x >= 80 && x < 720 ? 0xffff : 0));
+#if CONFIG_DSI_CHECK_MODEL
+    assert(display_model_blend_calls() == calls);
+#endif
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_OFF);
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_COUNT);
+    assert(gpsp_dsi_stats_mode() == GPSP_DISPLAY_STATS_OFF);
+    heap_caps_free(full);
+    puts("DSI_CHECK Stats: Off/Simple/Full pixels, bounds, immediate switch, UI pass");
 }
 
 static void check_color_lut(void)
@@ -383,6 +468,8 @@ static void display_check(void *arg)
         check_frame(40);
     }
     check_effects(input, ui);
+    check_stats(input, ui);
+    fill(input, 240, 160);
 #if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
 #if CONFIG_DSI_CHECK_MODEL
     check_copy_failure(input);

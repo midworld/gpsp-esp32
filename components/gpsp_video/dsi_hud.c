@@ -25,6 +25,8 @@
 #define HUD_X 40
 #define HUD_WIDTH 720
 #define HUD_HEIGHT (GPSP_FONT_HEIGHT * HUD_SCALE)
+/* FPS/SPD occupy the last 18 columns of the shared top bar. */
+#define HUD_SIMPLE_WIDTH (18 * GPSP_FONT_WIDTH * HUD_SCALE)
 #define HUD_BAR_PIXELS (HUD_WIDTH * HUD_HEIGHT)
 #define HUD_PIXELS (HUD_BAR_PIXELS * 2)
 #define HUD_BYTES (HUD_PIXELS * sizeof(uint32_t))
@@ -43,9 +45,9 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t *s_tiles[2];
 static unsigned s_active;
 static int s_reader = -1;
-static atomic_bool s_enabled;
+static atomic_uint s_mode;
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
-static struct hud_times s_times[2];
+static struct hud_times s_times[GPSP_DISPLAY_STATS_COUNT];
 static unsigned s_build_count, s_build_max;
 static uint64_t s_build_total;
 static int64_t s_log_us;
@@ -54,7 +56,7 @@ static int64_t s_log_us;
 static void hud_profile_log(void)
 {
     int64_t now = esp_timer_get_time();
-    struct hud_times times[2];
+    struct hud_times times[GPSP_DISPLAY_STATS_COUNT];
 
     if (now - s_log_us < 10000000)
         return;
@@ -62,15 +64,15 @@ static void hud_profile_log(void)
     memcpy(times, s_times, sizeof(times));
     memset(s_times, 0, sizeof(s_times));
     portEXIT_CRITICAL(&s_lock);
-    for (unsigned enabled = 0; enabled < 2; enabled++)
+    for (unsigned mode = 0; mode < GPSP_DISPLAY_STATS_COUNT; mode++)
     {
-        const struct hud_times *t = &times[enabled];
+        const struct hud_times *t = &times[mode];
 
         if (!t->count)
             continue;
-        ESP_LOGI("gpsp_hud", "STAT profile on=%u samples=%u "
+        ESP_LOGI("gpsp_hud", "STAT profile mode=%u samples=%u "
                 "ppa_avg_us=%u expand_avg_us=%u present_avg_us=%u "
-                "blend_avg_us=%u blend_max_us=%u dma_wait_avg_us=%u", enabled, t->count,
+                "blend_avg_us=%u blend_max_us=%u dma_wait_avg_us=%u", mode, t->count,
                 (unsigned)(t->total[0] / t->count),
                 (unsigned)(t->total[1] / t->count),
                 (unsigned)(t->total[2] / t->count),
@@ -180,15 +182,16 @@ void gpsp_dsi_hud_init(void)
     hud_build(s_tiles[0], empty);
 }
 
-bool gpsp_dsi_stats_enabled(void)
+enum gpsp_display_stats gpsp_dsi_stats_mode(void)
 {
-    return atomic_load_explicit(&s_enabled, memory_order_relaxed);
+    return atomic_load_explicit(&s_mode, memory_order_relaxed);
 }
 
-void gpsp_dsi_set_stats(bool enabled)
+void gpsp_dsi_set_stats(enum gpsp_display_stats mode)
 {
-    atomic_store_explicit(&s_enabled, enabled && s_tiles[0],
-            memory_order_relaxed);
+    if ((unsigned)mode < GPSP_DISPLAY_STATS_COUNT)
+        atomic_store_explicit(&s_mode, s_tiles[0] ? mode : GPSP_DISPLAY_STATS_OFF,
+                memory_order_relaxed);
 }
 
 /* Called after the shared LCD formatter by the low-priority status worker. */
@@ -199,7 +202,7 @@ void gpsp_dsi_hud_update(const struct lcd_status_value *values)
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     hud_profile_log();
 #endif
-    if (!gpsp_dsi_stats_enabled())
+    if (gpsp_dsi_stats_mode() == GPSP_DISPLAY_STATS_OFF)
         return;
     portENTER_CRITICAL(&s_lock);
     next = s_active ^ 1u;
@@ -226,25 +229,33 @@ void gpsp_dsi_hud_update(const struct lcd_status_value *values)
 #endif
 }
 
-esp_err_t gpsp_dsi_hud_draw(uint16_t *frame)
+esp_err_t gpsp_dsi_hud_draw(uint16_t *frame, enum gpsp_display_stats mode)
 {
     unsigned active;
     esp_err_t result = ESP_OK;
 
+    if (mode == GPSP_DISPLAY_STATS_OFF)
+        return ESP_OK;
     portENTER_CRITICAL(&s_lock);
     active = s_active;
     s_reader = (int)active;
     portEXIT_CRITICAL(&s_lock);
-    for (unsigned band = 0; band < 2 && result == ESP_OK; band++)
+    unsigned bands = mode == GPSP_DISPLAY_STATS_FULL ? 2 : 1;
+    unsigned width = mode == GPSP_DISPLAY_STATS_SIMPLE ? HUD_SIMPLE_WIDTH : HUD_WIDTH;
+
+    for (unsigned band = 0; band < bands && result == ESP_OK; band++)
     {
+        const uint32_t *tile = s_tiles[active] + band * HUD_BAR_PIXELS;
+        unsigned y = HUD_X;
 #if CONFIG_GPSP_LCD_ROTATE_180
         unsigned x = band ? 0 : 480 - HUD_HEIGHT;
+
+        tile += (HUD_WIDTH - width) * HUD_HEIGHT;
+        y += HUD_WIDTH - width;
 #else
         unsigned x = band ? 480 - HUD_HEIGHT : 0;
 #endif
-        result = gpsp_dsi_blend_overlay(frame,
-                s_tiles[active] + band * HUD_BAR_PIXELS,
-                HUD_HEIGHT, HUD_WIDTH, x, HUD_X);
+        result = gpsp_dsi_blend_overlay(frame, tile, HUD_HEIGHT, width, x, y);
     }
     portENTER_CRITICAL(&s_lock);
     s_reader = -1;
@@ -253,11 +264,11 @@ esp_err_t gpsp_dsi_hud_draw(uint16_t *frame)
 }
 
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
-void gpsp_dsi_hud_sample(bool enabled, unsigned ppa, unsigned expand,
+void gpsp_dsi_hud_sample(enum gpsp_display_stats mode, unsigned ppa, unsigned expand,
         unsigned present, unsigned blend, unsigned copy)
 {
     const unsigned values[HUD_FIELDS] = {ppa, expand, present, blend, copy};
-    struct hud_times *times = &s_times[enabled];
+    struct hud_times *times = &s_times[mode];
 
     portENTER_CRITICAL(&s_lock);
     times->count++;
@@ -273,7 +284,7 @@ void gpsp_dsi_hud_sample(bool enabled, unsigned ppa, unsigned expand,
 
 void gpsp_dsi_hud_shutdown(void)
 {
-    atomic_store(&s_enabled, false);
+    atomic_store(&s_mode, GPSP_DISPLAY_STATS_OFF);
     heap_caps_free(s_tiles[0]);
     s_tiles[0] = NULL;
     s_tiles[1] = NULL;

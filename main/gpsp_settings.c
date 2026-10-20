@@ -14,7 +14,7 @@
  *   fast_forward_mode=hold|toggle
  *   display_filter=nearest|bilinear|lcd_grid
  *   display_color=none|gba      DSI game output only
- *   display_stats=on|off       DSI game statistics overlay
+ *   display_stats=off|simple|full  DSI game statistics overlay
  *   last_rom=<name>             the ROM last started, for the game list
  *   wifi_ssid=<name>            the Wi-Fi network the menu joins
  *   wifi_password=<text>        its password, as plain text
@@ -63,7 +63,7 @@ struct gpsp_settings
     bool fast_forward_toggle;
     enum gpsp_display_filter display_filter;
     enum gpsp_display_color display_color;
-    bool display_stats;
+    enum gpsp_display_stats display_stats;
 };
 
 static const char *const s_filter_keys[GPSP_DISPLAY_FILTER_COUNT] = {
@@ -71,6 +71,9 @@ static const char *const s_filter_keys[GPSP_DISPLAY_FILTER_COUNT] = {
 };
 static const char *const s_color_keys[GPSP_DISPLAY_COLOR_COUNT] = {
     "none", "gba",
+};
+static const char *const s_stats_keys[GPSP_DISPLAY_STATS_COUNT] = {
+    "off", "simple", "full",
 };
 
 static const char *const s_control_keys[GPSP_SETTINGS_CONTROL_COUNT] = {
@@ -284,8 +287,16 @@ void gpsp_settings_load(void)
                 if (!strcmp(value, s_color_keys[i]))
                     color = i;
         gpsp_settings_set_display(filter, color);
-        bool stats = false;
-        gpsp_settings_switch("display_stats", &stats);
+        enum gpsp_display_stats stats = GPSP_DISPLAY_STATS_OFF;
+
+        if (gpsp_storage_config("display_stats", value, sizeof(value)))
+        {
+            for (unsigned i = 0; i < GPSP_DISPLAY_STATS_COUNT; i++)
+                if (!strcmp(value, s_stats_keys[i]))
+                    stats = i;
+            if (!strcmp(value, "on"))
+                stats = GPSP_DISPLAY_STATS_FULL;
+        }
         gpsp_settings_set_stats(stats);
     }
 
@@ -383,7 +394,7 @@ void gpsp_settings_save(void)
                 "display_color", s_color_keys[now.display_color] };
         if (now.display_stats != s_saved.display_stats)
             settings[count++] = (struct gpsp_storage_setting){
-                "display_stats", now.display_stats ? "on" : "off" };
+                "display_stats", s_stats_keys[now.display_stats] };
     }
 
     /* Without a card the settings last until power off. */
@@ -423,14 +434,14 @@ void gpsp_settings_set_display(enum gpsp_display_filter filter,
     gpsp_board_set_display_options(filter, color);
 }
 
-bool gpsp_settings_stats(void)
+enum gpsp_display_stats gpsp_settings_stats(void)
 {
     return gpsp_board_stats();
 }
 
-void gpsp_settings_set_stats(bool enabled)
+void gpsp_settings_set_stats(enum gpsp_display_stats mode)
 {
-    gpsp_board_set_stats(enabled);
+    gpsp_board_set_stats(mode);
 }
 
 int gpsp_settings_frameskip(void)
