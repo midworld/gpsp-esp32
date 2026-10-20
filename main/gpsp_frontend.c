@@ -1128,9 +1128,8 @@ static void gpsp_benchmark_free(void)
 /* GBA frame period: 280,896 cycles at 16,777,216 Hz. */
 #define GPSP_FRAME_PERIOD_US 16743u
 
-/* Logs frames that took longer than one GBA frame, with the block
-   translation and ROM page loads done in them; at most ten lines per
-   second. run_us includes upkeep_us. */
+/* Collect slow frames without formatting or serial output on CPU0.
+   run_us includes upkeep_us. */
 static void gpsp_slow_frame_note(uint32_t run_us, uint32_t upkeep_us)
 {
     static uint32_t last_blocks;
@@ -1140,9 +1139,6 @@ static void gpsp_slow_frame_note(uint32_t run_us, uint32_t upkeep_us)
     static uint32_t last_rom_reloads;
     static uint32_t last_rom_remaps;
     static uint32_t last_rom_cycles;
-    static int64_t window_start_us;
-    static unsigned lines;
-    static unsigned skipped;
     uint32_t blocks = 0;
     uint32_t cycles = 0;
 
@@ -1170,34 +1166,14 @@ static void gpsp_slow_frame_note(uint32_t run_us, uint32_t upkeep_us)
     if (run_us <= GPSP_FRAME_PERIOD_US)
         return;
 
-    int64_t now_us = esp_timer_get_time();
-    if (now_us - window_start_us >= 1000000)
-    {
-        window_start_us = now_us;
-        lines = 0;
-    }
-    if (lines++ >= 10)
-    {
-        skipped++;
-        return;
-    }
-    ESP_LOGW(TAG, "SLOW frame=%lu run=%lu.%lums render=%lu.%lums "
-            "translated=%lu translate=%lu.%lums upkeep=%lu.%lums "
-            "rom_pages=%lu rom_reloads=%lu rom_remaps=%lu rom_load=%lu.%lums "
-            "skipped=%u",
-            (unsigned long)s_frame_count,
-            (unsigned long)(run_us / 1000), (unsigned long)(run_us % 1000 / 100),
-            (unsigned long)(render_us / 1000),
-            (unsigned long)(render_us % 1000 / 100),
-            (unsigned long)new_blocks, (unsigned long)(translate_us / 1000),
-            (unsigned long)(translate_us % 1000 / 100),
-            (unsigned long)(upkeep_us / 1000),
-            (unsigned long)(upkeep_us % 1000 / 100),
-            (unsigned long)new_rom_loads, (unsigned long)new_rom_reloads,
-            (unsigned long)new_rom_remaps,
-            (unsigned long)(rom_us / 1000), (unsigned long)(rom_us % 1000 / 100),
-            skipped);
-    skipped = 0;
+    const struct gpsp_slow_frame frame = {
+        .frame = s_frame_count, .run_us = run_us, .render_us = render_us,
+        .translated = new_blocks, .translate_us = translate_us,
+        .upkeep_us = upkeep_us, .rom_pages = new_rom_loads,
+        .rom_reloads = new_rom_reloads, .rom_remaps = new_rom_remaps,
+        .rom_load_us = rom_us,
+    };
+    gpsp_profile_record_slow(&frame);
 }
 #endif
 

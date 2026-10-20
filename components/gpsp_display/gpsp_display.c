@@ -19,8 +19,10 @@ void gpsp_display_nearest2_p4(uint16_t *out, const uint16_t *in,
 void gpsp_display_nearest3_p4(uint16_t *out, const uint16_t *in,
         unsigned groups, unsigned pitch_bytes);
 void gpsp_display_grid3_p4(uint16_t *bright0, uint16_t *bright1, uint16_t *dark,
-        const uint16_t *normal, const uint16_t *dim, const uint16_t *corner,
+        const uint16_t *normal,
         unsigned groups, bool edge_first);
+void gpsp_display_transpose4_p4(uint16_t *output, const uint16_t *input,
+        int input_pitch_bytes, int output_pitch_bytes);
 #endif
 
 /* GBA sRGB matrix/gamma: Pokefan531, hunterk, crashGG (public domain).
@@ -81,8 +83,7 @@ void gpsp_display_expand(uint16_t *output, const uint16_t *input,
         unsigned width, unsigned height, unsigned pitch, unsigned scale,
         int grid_x, int grid_y, const uint16_t *lut)
 {
-    /* Small internal rows keep LUT and grid work at source resolution. */
-    uint16_t rows[3][240] __attribute__((aligned(16)));
+    uint16_t colors[240] __attribute__((aligned(16)));
     bool grid = grid_x >= 0;
 
     assert(width <= 240 && (scale == 2 || scale == 3));
@@ -96,20 +97,11 @@ void gpsp_display_expand(uint16_t *output, const uint16_t *input,
         const uint16_t *source = input + y * width;
         const uint16_t *normal = source;
 
-        if (lut || grid)
+        if (lut)
         {
             for (unsigned x = 0; x < width; x++)
-            {
-                uint16_t pixel = lut ? lut[source[x]] : source[x];
-
-                rows[0][x] = pixel;
-                if (grid)
-                {
-                    rows[1][x] = display_dim(pixel);
-                    rows[2][x] = display_dim(rows[1][x]);
-                }
-            }
-            normal = rows[0];
+                colors[x] = lut[source[x]];
+            normal = colors;
         }
         if (grid)
         {
@@ -118,21 +110,28 @@ void gpsp_display_expand(uint16_t *output, const uint16_t *input,
             uint16_t *dark = row + grid_y * pitch;
 
 #if CONFIG_GPSP_LCD_DSI_SIMD
-            if (!(width % 8) && !((uintptr_t)row % 16) && !(pitch % 8))
+            if (!(width % 8) && !(((uintptr_t)row | (uintptr_t)normal) % 16) &&
+                    !(pitch % 8))
             {
                 gpsp_display_grid3_p4(bright0, bright1, dark, normal,
-                        rows[1], rows[2], width / 8, grid_x == 0);
+                        width / 8, grid_x == 0);
                 continue;
             }
 #endif
             for (unsigned x = 0; x < width; x++)
+            {
+                uint16_t pixel = normal[x];
+                uint16_t dim = display_dim(pixel);
+                uint16_t corner = display_dim(dim);
+
                 for (unsigned dx = 0; dx < 3; dx++)
                 {
                     bool edge = dx == (unsigned)grid_x;
 
-                    bright0[x * 3 + dx] = edge ? rows[1][x] : normal[x];
-                    dark[x * 3 + dx] = edge ? rows[2][x] : rows[1][x];
+                    bright0[x * 3 + dx] = edge ? dim : pixel;
+                    dark[x * 3 + dx] = edge ? corner : dim;
                 }
+            }
             memcpy(bright1, bright0, width * 3 * sizeof(*row));
             continue;
         }
@@ -153,4 +152,39 @@ void gpsp_display_expand(uint16_t *output, const uint16_t *input,
         for (unsigned dy = 1; dy < scale; dy++)
             memcpy(row + dy * pitch, row, width * scale * sizeof(*row));
     }
+}
+
+void gpsp_display_rotate_expand(uint16_t *output, const uint16_t *input,
+        unsigned first, unsigned rows, bool rotate_180,
+        int grid_x, int grid_y, const uint16_t *lut)
+{
+    assert(rows && !(first % 4) && !(rows % 4) && first + rows <= 240);
+    uint16_t *rotated = output + 160 * rows * 8;
+    int input_pitch = rotate_180 ? -240 : 240;
+    int output_pitch = rotate_180 ? 160 : -160;
+
+    for (unsigned y = 0; y < rows; y += 4)
+        for (unsigned x = 0; x < 160; x += 4)
+        {
+            const uint16_t *source = rotate_180 ?
+                    input + (159 - x) * 240 + first + y :
+                    input + x * 240 + 236 - first - y;
+            uint16_t *dest = rotated +
+                    (rotate_180 ? y : y + 3) * 160 + x;
+#if CONFIG_GPSP_LCD_DSI_SIMD
+            if (!(((uintptr_t)dest | (uintptr_t)source) % 8))
+            {
+                gpsp_display_transpose4_p4(dest, source,
+                        input_pitch * 2, output_pitch * 2);
+                continue;
+            }
+#endif
+            for (int row = 0; row < 4; row++)
+                for (int col = 0; col < 4; col++)
+                    dest[col * output_pitch + row] =
+                            source[row * input_pitch + col];
+        }
+    /* Forward expansion reaches these pixels only after consuming them. */
+    gpsp_display_expand(output, rotated, 160, rows, 480, 3,
+            grid_x, grid_y, lut);
 }

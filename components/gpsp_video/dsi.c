@@ -13,6 +13,9 @@
 #include <stdatomic.h>
 
 #include "driver/ppa.h"
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+#include "esp_async_color_convert.h"
+#endif
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
@@ -51,6 +54,153 @@ static unsigned s_next;
 static bool s_ready;
 static uint16_t *s_work;
 static uint16_t *s_color_lut;
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+#define DSI_TILE_ROWS CONFIG_GPSP_LCD_DSI_TILE_ROWS
+#define DSI_TILE_BYTES (DSI_WIDTH * DSI_TILE_ROWS * 3 * sizeof(uint16_t))
+static async_color_convert_handle_t s_copy;
+static uint16_t *s_tile;
+static SemaphoreHandle_t s_copy_done[2];
+
+_Static_assert(DSI_TILE_ROWS == 8 || DSI_TILE_ROWS == 12 || DSI_TILE_ROWS == 16,
+        "Unsupported scaling tile size");
+
+static bool dsi_copy_done(async_color_convert_handle_t handle,
+        async_color_convert_event_data_t *event, void *arg)
+{
+    BaseType_t woken = pdFALSE;
+
+    (void)handle;
+    (void)event;
+    xSemaphoreGiveFromISR(arg, &woken);
+    return woken == pdTRUE;
+}
+
+static void dsi_copy_wait(unsigned slot, unsigned *copy_us)
+{
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    int64_t start = copy_us ? esp_timer_get_time() : 0;
+#else
+    (void)copy_us;
+#endif
+    xSemaphoreTake(s_copy_done[slot], portMAX_DELAY);
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+    if (copy_us)
+        *copy_us += (unsigned)(esp_timer_get_time() - start);
+#endif
+}
+
+static void dsi_copy_shutdown(void)
+{
+    if (s_copy)
+    {
+        esp_err_t result;
+
+        /* A callback on the other core can precede descriptor recycling. */
+        do
+        {
+            result = esp_async_color_convert_uninstall(s_copy);
+            if (result == ESP_ERR_INVALID_STATE)
+                vTaskDelay(1);
+        } while (result == ESP_ERR_INVALID_STATE);
+        ESP_ERROR_CHECK(result);
+    }
+    s_copy = NULL;
+    heap_caps_free(s_tile);
+    s_tile = NULL;
+    for (unsigned i = 0; i < 2; i++)
+    {
+        if (s_copy_done[i])
+            vSemaphoreDelete(s_copy_done[i]);
+        s_copy_done[i] = NULL;
+    }
+}
+
+static void dsi_copy_init(void)
+{
+    const async_color_convert_config_t config = {
+        /* Two tiles plus a descriptor still being recycled by its ISR. */
+        .backlog = 3,
+        .dma_burst_size = 128,
+    };
+    esp_err_t result = ESP_ERR_NO_MEM;
+
+    s_tile = heap_caps_aligned_alloc(64, DSI_TILE_BYTES * 2,
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    for (unsigned i = 0; i < 2; i++)
+        s_copy_done[i] = xSemaphoreCreateBinary();
+    if (s_tile && s_copy_done[0] && s_copy_done[1])
+        result = esp_async_color_convert_install_dma2d(&config, &s_copy);
+    if (result != ESP_OK)
+    {
+        ESP_LOGW(TAG, "SRAM scaling unavailable: %s", esp_err_to_name(result));
+        dsi_copy_shutdown();
+    }
+}
+
+static esp_err_t dsi_expand_tiles(uint16_t *frame, int grid_x, int grid_y,
+        const uint16_t *lut, unsigned *copy_us, const uint16_t *rotate_source)
+{
+    bool pending[2] = {false, false};
+    esp_err_t result = ESP_OK;
+
+    for (unsigned y = 0; y < 240; y += DSI_TILE_ROWS)
+    {
+        unsigned rows = 240 - y;
+        unsigned slot = (y / DSI_TILE_ROWS) & 1;
+        uint16_t *tile = s_tile + slot *
+                (DSI_TILE_BYTES / sizeof(*s_tile));
+
+        if (rows > DSI_TILE_ROWS)
+            rows = DSI_TILE_ROWS;
+        /* Reuse only a completed tile; the other transfer stays queued. */
+        if (pending[slot])
+        {
+            dsi_copy_wait(slot, copy_us);
+            pending[slot] = false;
+        }
+        if (rotate_source)
+            gpsp_display_rotate_expand(tile, rotate_source, y, rows,
+#if CONFIG_GPSP_LCD_ROTATE_180
+                    true,
+#else
+                    false,
+#endif
+                    grid_x, grid_y, lut);
+        else
+            gpsp_display_expand(tile, s_work + y * 160, 160, rows,
+                    DSI_WIDTH, 3, grid_x, grid_y, lut);
+        /* Limit cache maintenance to this tile, not the whole display. */
+        const async_color_convert_request_t request = {
+            .src_buffer = tile, .src_stride = DSI_WIDTH,
+            .src_height = rows * 3,
+            .dst_buffer = frame + y * 3 * DSI_WIDTH,
+            .dst_stride = DSI_WIDTH, .dst_height = rows * 3,
+            .copy_width = DSI_WIDTH, .copy_height = rows * 3,
+            .src_color_format = ESP_COLOR_FOURCC_RGB16,
+            .dst_color_format = ESP_COLOR_FOURCC_RGB16,
+        };
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+        int64_t start = copy_us ? esp_timer_get_time() : 0;
+#else
+        (void)copy_us;
+#endif
+        result = esp_async_color_convert(s_copy, &request,
+                dsi_copy_done, s_copy_done[slot]);
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+        if (copy_us)
+            *copy_us += (unsigned)(esp_timer_get_time() - start);
+#endif
+        if (result != ESP_OK)
+            break;
+        pending[slot] = true;
+    }
+    /* Complete every transfer before PPA blending or scanout. */
+    for (unsigned i = 0; i < 2; i++)
+        if (pending[i])
+            dsi_copy_wait(i, copy_us);
+    return result;
+}
+#endif
 /* One snapshot per frame; UI changes take effect on the next game frame. */
 static atomic_uint s_options;
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
@@ -279,11 +429,16 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
     const uint16_t *lut = !ui && color == GPSP_DISPLAY_COLOR_GBA ?
             s_color_lut : NULL;
     bool bilinear = !ui && filter == GPSP_DISPLAY_BILINEAR;
+    bool cpu_rotate = false;
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND && CONFIG_GPSP_LCD_DSI_CPU_ROTATE
+    cpu_rotate = !ui && !bilinear && s_copy;
+#endif
     unsigned offset_y = (DSI_HEIGHT - width * scale) / 2;
     bool hud = !ui && gpsp_dsi_stats_enabled();
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     bool sample = !ui && ((s_profile_frames++ & 15) == 0);
     int64_t ppa_start = 0, ppa_end = 0, expand_end = 0, hud_end = 0;
+    unsigned copy_us = 0;
 #endif
 
     if (bilinear && lut)
@@ -337,7 +492,7 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
     if (sample)
         ppa_start = esp_timer_get_time();
 #endif
-    esp_err_t result = ppa_do_scale_rotate_mirror(
+    esp_err_t result = cpu_rotate ? ESP_OK : ppa_do_scale_rotate_mirror(
             ui ? s_ui_ppa : s_game_ppa, &operation);
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     if (sample)
@@ -369,8 +524,40 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
             grid_y = 0;
 #endif
         }
-        gpsp_display_expand((uint16_t *)s_frames[s_next] + offset_y * DSI_WIDTH,
-                s_work, height, width, DSI_WIDTH, scale, grid_x, grid_y, lut);
+        uint16_t *frame = (uint16_t *)s_frames[s_next] + offset_y * DSI_WIDTH;
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+        if (!ui && s_copy)
+        {
+            result = dsi_expand_tiles(frame, grid_x, grid_y, lut,
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+                    sample ? &copy_us : NULL,
+#else
+                    NULL,
+#endif
+                    cpu_rotate ? pixels : NULL);
+            if (result != ESP_OK)
+            {
+                ESP_LOGW(TAG, "SRAM scaling disabled: %s", esp_err_to_name(result));
+                dsi_copy_shutdown();
+                if (cpu_rotate)
+                    gpsp_display_rotate_expand(frame, pixels, 0, 240,
+#if CONFIG_GPSP_LCD_ROTATE_180
+                            true,
+#else
+                            false,
+#endif
+                            grid_x, grid_y, lut);
+                else
+                    gpsp_display_expand(frame, s_work, height, width, DSI_WIDTH,
+                            scale, grid_x, grid_y, lut);
+            }
+        }
+        else
+#endif
+        {
+            gpsp_display_expand(frame, s_work, height, width, DSI_WIDTH,
+                    scale, grid_x, grid_y, lut);
+        }
     }
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     if (sample)
@@ -397,7 +584,7 @@ esp_err_t gpsp_dsi_draw(const uint16_t *pixels, bool ui)
         gpsp_dsi_hud_sample(hud, (unsigned)(ppa_end - ppa_start),
                 (unsigned)(expand_end - ppa_end),
                 (unsigned)(esp_timer_get_time() - hud_end),
-                hud ? (unsigned)(hud_end - expand_end) : 0);
+                hud ? (unsigned)(hud_end - expand_end) : 0, copy_us);
     dsi_diagnostics(ui, (unsigned)filter | ((unsigned)color << 8),
             start, rendered, result);
 #endif
@@ -490,6 +677,9 @@ esp_err_t gpsp_dsi_init(void)
     DSI_TRY(ppa_register_client(&ppa, &s_game_ppa));
     DSI_TRY(ppa_register_client(&ppa, &s_ui_ppa));
     DSI_TRY(ppa_register_client(&overlay, &s_overlay_ppa));
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+    dsi_copy_init();
+#endif
     DSI_TRY(esp_lcd_panel_init(s_panel));
     memset(s_widths, 0, sizeof(s_widths));
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
@@ -514,6 +704,15 @@ esp_err_t gpsp_dsi_init(void)
     ESP_LOGI(TAG, "DSI clock=%.1fMHz lanes=2 rate=%uMbps buffers=%u init_core=%d",
             (double)gpsp_dsi_panel.clock_mhz, gpsp_dsi_panel.lane_mbps,
             DSI_BUFFERS, xPortGetCoreID());
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+    ESP_LOGI(TAG, "SRAM scaling tiles=2 rows=%u bytes=%u DMA2D=%s",
+            DSI_TILE_ROWS, (unsigned)DSI_TILE_BYTES * 2,
+            s_copy ? "on" : "off");
+#if CONFIG_GPSP_LCD_DSI_CPU_ROTATE
+    if (s_copy)
+        ESP_LOGI(TAG, "Integer rotation: CPU1");
+#endif
+#endif
     return ESP_OK;
 
 fail:
@@ -526,6 +725,9 @@ void gpsp_dsi_shutdown(void)
 {
     s_ready = false;
     gpsp_dsi_hud_shutdown();
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+    dsi_copy_shutdown();
+#endif
     gpsp_dsi_panel.backlight(false);
     if (s_panel)
     {

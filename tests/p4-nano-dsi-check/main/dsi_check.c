@@ -19,8 +19,57 @@ void display_model_fail_init(void);
 unsigned display_model_ppa_scale(void);
 unsigned display_model_ppa_source_pixels(void);
 unsigned display_model_ppa_core(void);
+unsigned display_model_ppa_calls(void);
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+void display_model_dma_fail_after(unsigned requests);
+void display_model_dma_check(void);
+#endif
 #endif
 void display_settings_check(uint16_t *ui);
+
+#if CONFIG_GPSP_LCD_DSI_SIMD
+static uint16_t shade_reference(uint16_t p)
+{
+    unsigned r = ((p >> 11) * 3 + 2) / 4;
+    unsigned g = (((p >> 5) & 63) * 3 + 2) / 4;
+    unsigned b = ((p & 31) * 3 + 2) / 4;
+
+    return (r << 11) | (g << 5) | b;
+}
+
+static void check_simd_shading(void)
+{
+    uint16_t input[160] __attribute__((aligned(16)));
+    uint16_t output[3 * 480 + 8] __attribute__((aligned(16)));
+
+    for (unsigned base = 0; base < 65536; base += 160)
+    {
+        for (unsigned i = 0; i < 160; i++)
+            input[i] = (uint16_t)(base + i);
+        for (unsigned gx = 0; gx <= 2; gx += 2)
+            for (unsigned gy = 0; gy <= 2; gy += 2)
+            {
+                for (unsigned i = 0; i < 3 * 480 + 8; i++)
+                    output[i] = 0xdead;
+                gpsp_display_expand(output, input, 160, 1, 480, 3,
+                        gx, gy, NULL);
+                for (unsigned y = 0; y < 3; y++)
+                    for (unsigned x = 0; x < 480; x++)
+                    {
+                        uint16_t expected = input[x / 3];
+                        if (x % 3 == gx)
+                            expected = shade_reference(expected);
+                        if (y == gy)
+                            expected = shade_reference(expected);
+                        assert(output[y * 480 + x] == expected);
+                    }
+                for (unsigned i = 3 * 480; i < 3 * 480 + 8; i++)
+                    assert(output[i] == 0xdead);
+            }
+    }
+    puts("DSI_CHECK fused SIMD grid: all RGB565 colors and edges pass");
+}
+#endif
 
 static bool ppa_done(ppa_client_handle_t client,
         ppa_event_data_t *event, void *arg)
@@ -117,10 +166,17 @@ static void check_effects(uint16_t *input, uint16_t *ui)
         {
             gpsp_dsi_set_options(grid ? GPSP_DISPLAY_LCD_GRID :
                     GPSP_DISPLAY_NEAREST, color);
+#if CONFIG_DSI_CHECK_MODEL && CONFIG_GPSP_LCD_DSI_CPU_ROTATE
+            unsigned calls = display_model_ppa_calls();
+#endif
             ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
 #if CONFIG_DSI_CHECK_MODEL
+#if CONFIG_GPSP_LCD_DSI_CPU_ROTATE
+            assert(display_model_ppa_calls() == calls);
+#else
             assert(display_model_ppa_scale() == 1);
             assert(display_model_ppa_source_pixels() == 240 * 160);
+#endif
 #endif
             const uint16_t *pixels = last_frame();
             for (unsigned y = 0; y < 480; y++)
@@ -191,10 +247,61 @@ static void check_effects(uint16_t *input, uint16_t *ui)
     puts("DSI_CHECK display effects pass");
 }
 
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+#if !CONFIG_DSI_CHECK_MODEL
+static void check_tile_timing(void)
+{
+    assert(s_copy && s_tile);
+    uint16_t *frame = (uint16_t *)s_frames[s_next] + 40 * DSI_WIDTH;
+
+    for (unsigned grid = 0; grid < 2; grid++)
+        for (unsigned dma = 0; dma < 2; dma++)
+        {
+            int64_t total = 0;
+            int gx = grid ? 2 : -1, gy = grid ? 0 : -1;
+
+            for (unsigned i = 0; i < 20; i++)
+            {
+                int64_t start = esp_timer_get_time();
+                if (dma)
+                    ESP_ERROR_CHECK(dsi_expand_tiles(frame, gx, gy, NULL, NULL, NULL));
+                else
+                    gpsp_display_expand(frame, s_work, 160, 240, DSI_WIDTH,
+                            3, gx, gy, NULL);
+                total += esp_timer_get_time() - start;
+                vTaskDelay(1);
+            }
+            printf("DSI_CHECK scaling grid=%u dma=%u avg_us=%u\n",
+                    grid, dma, (unsigned)(total / 20));
+        }
+}
+#endif
+
+#if CONFIG_DSI_CHECK_MODEL
+static void check_copy_failure(uint16_t *input)
+{
+    display_model_dma_check();
+    for (unsigned requests = 2; requests <= 3; requests++)
+    {
+        display_model_dma_fail_after(requests);
+        ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+        assert(!s_copy && !s_tile);
+        check_frame(40);
+        dsi_copy_init();
+        assert(s_copy && s_tile);
+    }
+    puts("DSI_CHECK queued DMA ownership and failure drain pass");
+}
+#endif
+#endif
+
 static void display_check(void *arg)
 {
     (void)arg;
     printf("DSI_CHECK CPU%u\n", (unsigned)xPortGetCoreID());
+#if CONFIG_GPSP_LCD_DSI_SIMD
+    check_simd_shading();
+#endif
 #if CONFIG_DSI_CHECK_MODEL
     puts("DSI_CHECK test-only peripheral model");
 #endif
@@ -276,6 +383,13 @@ static void display_check(void *arg)
         check_frame(40);
     }
     check_effects(input, ui);
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+#if CONFIG_DSI_CHECK_MODEL
+    check_copy_failure(input);
+#else
+    check_tile_timing();
+#endif
+#endif
     display_settings_check(ui);
     gpsp_lcd_ui_end();
     const uint16_t *blank = s_frames[(s_next + DSI_BUFFERS - 1) % DSI_BUFFERS];

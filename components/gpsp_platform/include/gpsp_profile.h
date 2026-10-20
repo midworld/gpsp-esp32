@@ -7,6 +7,7 @@
 #ifndef GPSP_PROFILE_H
 #define GPSP_PROFILE_H
 
+#include "sdkconfig.h"
 #include <stdint.h>
 
 struct gpsp_profile_phase
@@ -36,5 +37,27 @@ uint32_t gpsp_profile_frames(void);
 void gpsp_profile_record_copy(uint32_t duration_us);
 void gpsp_profile_record_send(uint32_t duration_us);
 void gpsp_profile_take(int64_t now_us, struct gpsp_profile_window *window);
+#if CONFIG_GPSP_STATUS
+struct gpsp_slow_frame
+{
+    uint32_t frame, run_us, render_us, translated, translate_us, upkeep_us;
+    uint32_t rom_pages, rom_reloads, rom_remaps, rom_load_us;
+};
+
+struct gpsp_slow_window
+{
+    uint32_t count;
+    uint64_t total_us;
+    struct gpsp_slow_frame worst;
+};
+
+/* Keep the slowest frame's details; formatting runs on the status worker. */
+void gpsp_profile_record_slow(const struct gpsp_slow_frame *frame);
+void gpsp_profile_take_slow(struct gpsp_slow_window *window);
+#endif
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+/* Independent frame window; does not consume transport measurements. */
+void gpsp_profile_take_frame(int64_t now_us, struct gpsp_profile_window *window);
+#endif
 
 #endif /* GPSP_PROFILE_H */

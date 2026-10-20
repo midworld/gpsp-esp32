@@ -7,6 +7,7 @@
 
 #include <assert.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include "driver/i2c_master.h"
@@ -18,6 +19,9 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_ldo_regulator.h"
 #include "esp_timer.h"
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+#include "esp_async_color_convert.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -32,6 +36,12 @@ static bool fail_panel_init;
 static unsigned last_scale;
 static unsigned last_source_pixels;
 static unsigned last_core;
+static unsigned ppa_calls;
+
+unsigned display_model_ppa_calls(void)
+{
+    return ppa_calls;
+}
 
 unsigned display_model_ppa_source_pixels(void)
 {
@@ -137,7 +147,12 @@ esp_err_t __wrap_i2c_master_transmit(i2c_master_dev_handle_t device,
 esp_err_t __wrap_esp_lcd_new_dsi_bus(const esp_lcd_dsi_bus_config_t *config,
         esp_lcd_dsi_bus_handle_t *bus)
 {
-    assert(config->num_data_lanes == 2 && config->lane_bit_rate_mbps == 500);
+    assert(config->num_data_lanes == 2);
+#if CONFIG_GPSP_LCD_DSI_OSPTEK
+    assert(config->lane_bit_rate_mbps == 820);
+#else
+    assert(config->lane_bit_rate_mbps == 500);
+#endif
     *bus = (void *)&dsi_token;
     return ESP_OK;
 }
@@ -273,7 +288,8 @@ static void ppa_tick(void *arg)
 esp_err_t __wrap_ppa_register_client(const ppa_client_config_t *config,
         ppa_client_handle_t *handle)
 {
-    assert(config->oper_type == PPA_OPERATION_SRM);
+    assert(config->oper_type == PPA_OPERATION_SRM ||
+            config->oper_type == PPA_OPERATION_BLEND);
     struct model_client *client = calloc(1, sizeof(*client));
     assert(client);
     const esp_timer_create_args_t timer = {
@@ -305,6 +321,7 @@ esp_err_t __wrap_ppa_do_scale_rotate_mirror(ppa_client_handle_t handle,
         const ppa_srm_oper_config_t *op)
 {
     struct model_client *client = (void *)handle;
+    ppa_calls++;
     assert(op->in.buffer != op->out.buffer && ((uintptr_t)op->out.buffer % 64) == 0);
     assert(op->out.buffer_size >= op->out.pic_w * op->out.pic_h * 2);
     assert(op->in.srm_cm == PPA_SRM_COLOR_MODE_RGB565 &&
@@ -348,3 +365,181 @@ esp_err_t __wrap_ppa_do_scale_rotate_mirror(ppa_client_handle_t handle,
     }
     return ESP_OK;
 }
+
+esp_err_t __wrap_ppa_do_blend(ppa_client_handle_t handle,
+        const ppa_blend_oper_config_t *op)
+{
+    (void)handle;
+    assert(op->in_bg.blend_cm == PPA_BLEND_COLOR_MODE_RGB565 &&
+            op->in_fg.blend_cm == PPA_BLEND_COLOR_MODE_ARGB8888 &&
+            op->out.blend_cm == PPA_BLEND_COLOR_MODE_RGB565);
+    assert(op->bg_alpha_update_mode == PPA_ALPHA_FIX_VALUE &&
+            op->bg_alpha_fix_val == 255 &&
+            op->fg_alpha_update_mode == PPA_ALPHA_NO_CHANGE);
+    assert(op->mode == PPA_TRANS_MODE_BLOCKING);
+    const uint16_t *bg = op->in_bg.buffer;
+    const uint32_t *fg = op->in_fg.buffer;
+    uint16_t *output = op->out.buffer;
+    assert(!panel_model || output != panel_model->active);
+    for (unsigned y = 0; y < op->in_bg.block_h; y++)
+        for (unsigned x = 0; x < op->in_bg.block_w; x++)
+        {
+            uint16_t b = bg[(y + op->in_bg.block_offset_y) * op->in_bg.pic_w +
+                    x + op->in_bg.block_offset_x];
+            uint32_t f = fg[(y + op->in_fg.block_offset_y) * op->in_fg.pic_w +
+                    x + op->in_fg.block_offset_x];
+            unsigned alpha = f >> 24;
+            unsigned r = ((f >> 16 & 255) * alpha +
+                    (b >> 11) * 255 / 31 * (255 - alpha) + 127) / 255;
+            unsigned g = ((f >> 8 & 255) * alpha +
+                    (b >> 5 & 63) * 255 / 63 * (255 - alpha) + 127) / 255;
+            unsigned blue = ((f & 255) * alpha +
+                    (b & 31) * 255 / 31 * (255 - alpha) + 127) / 255;
+            output[(y + op->out.block_offset_y) * op->out.pic_w +
+                    x + op->out.block_offset_x] =
+                    ((r * 31 + 127) / 255 << 11) |
+                    ((g * 63 + 127) / 255 << 5) | ((blue * 31 + 127) / 255);
+        }
+    return esp_cache_msync(output, op->out.buffer_size,
+            ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+}
+
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+struct model_copy;
+struct model_copy_job
+{
+    struct model_copy *copy;
+    async_color_convert_request_t request;
+    async_color_convert_isr_cb_t callback;
+    void *arg;
+    esp_timer_handle_t timer;
+    atomic_bool busy;
+    atomic_bool owned;
+    unsigned sequence;
+    uint32_t checksum;
+};
+
+struct model_copy
+{
+    struct model_copy_job jobs[3];
+    unsigned sequence, fail_at;
+};
+static struct model_copy *copy_model;
+static atomic_uint copy_peak, copy_reordered;
+
+void display_model_dma_fail_after(unsigned requests)
+{
+    assert(copy_model);
+    copy_model->fail_at = copy_model->sequence + requests;
+}
+
+void display_model_dma_check(void)
+{
+    assert(atomic_load(&copy_peak) == 2);
+    assert(atomic_load(&copy_reordered));
+}
+
+static uint32_t copy_checksum(const async_color_convert_request_t *request)
+{
+    const uint16_t *source = request->src_buffer;
+    uint32_t sum = 2166136261u;
+    for (unsigned y = 0; y < request->copy_height; y++)
+        for (unsigned x = 0; x < request->copy_width; x++)
+            sum = (sum ^ source[(y + request->src_y) * request->src_stride +
+                    x + request->src_x]) * 16777619u;
+    return sum;
+}
+
+static void copy_tick(void *arg)
+{
+    struct model_copy_job *job = arg;
+    /* Delayed completion keeps source ownership observable after submission. */
+    assert(job->checksum == copy_checksum(&job->request));
+    for (unsigned i = 0; i < 3; i++)
+        if (atomic_load(&job->copy->jobs[i].owned) &&
+                job->copy->jobs[i].sequence < job->sequence)
+            atomic_fetch_add(&copy_reordered, 1);
+    atomic_store(&job->owned, false);
+    async_color_convert_event_data_t event = {};
+    bool yield = job->callback((void *)job->copy, &event, job->arg);
+    atomic_store(&job->busy, false);
+    if (yield)
+        esp_timer_isr_dispatch_need_yield();
+}
+
+esp_err_t __wrap_esp_async_color_convert_install_dma2d(
+        const async_color_convert_config_t *config,
+        async_color_convert_handle_t *handle)
+{
+    assert(!copy_model && config->backlog == 3);
+    struct model_copy *copy = calloc(1, sizeof(*copy));
+    assert(copy);
+    for (unsigned i = 0; i < 3; i++)
+    {
+        struct model_copy_job *job = &copy->jobs[i];
+        job->copy = copy;
+        atomic_init(&job->busy, false);
+        atomic_init(&job->owned, false);
+        const esp_timer_create_args_t timer = {
+            .callback = copy_tick, .arg = job,
+            .dispatch_method = ESP_TIMER_ISR, .name = "copy_model",
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer, &job->timer));
+    }
+    copy_model = copy;
+    *handle = (void *)copy;
+    return ESP_OK;
+}
+
+esp_err_t __wrap_esp_async_color_convert_uninstall(async_color_convert_handle_t handle)
+{
+    struct model_copy *copy = (void *)handle;
+    assert(copy == copy_model);
+    for (unsigned i = 0; i < 3; i++)
+        if (atomic_load(&copy->jobs[i].busy))
+            return ESP_ERR_INVALID_STATE;
+    for (unsigned i = 0; i < 3; i++)
+        ESP_ERROR_CHECK(esp_timer_delete(copy->jobs[i].timer));
+    free(copy);
+    copy_model = NULL;
+    return ESP_OK;
+}
+
+esp_err_t __wrap_esp_async_color_convert(async_color_convert_handle_t handle,
+        const async_color_convert_request_t *request,
+        async_color_convert_isr_cb_t callback, void *arg)
+{
+    struct model_copy *copy = (void *)handle;
+    assert(copy == copy_model);
+    if (++copy->sequence == copy->fail_at)
+        return ESP_FAIL;
+    unsigned active = 0;
+    struct model_copy_job *job = NULL;
+    for (unsigned i = 0; i < 3; i++)
+    {
+        if (atomic_load(&copy->jobs[i].owned))
+            active++;
+        if (!atomic_load(&copy->jobs[i].busy) && !job)
+            job = &copy->jobs[i];
+    }
+    assert(job && active < 2);
+    if (active + 1 > atomic_load(&copy_peak))
+        atomic_store(&copy_peak, active + 1);
+    job->request = *request;
+    job->callback = callback;
+    job->arg = arg;
+    job->sequence = copy->sequence;
+    job->checksum = copy_checksum(request);
+    const uint16_t *source = request->src_buffer;
+    uint16_t *dest = request->dst_buffer;
+    for (unsigned y = 0; y < request->copy_height; y++)
+        memcpy(dest + (y + request->dst_y) * request->dst_stride + request->dst_x,
+                source + (y + request->src_y) * request->src_stride + request->src_x,
+                request->copy_width * sizeof(*dest));
+    ESP_ERROR_CHECK(esp_cache_msync(dest, request->dst_stride * request->dst_height * 2,
+            ESP_CACHE_MSYNC_FLAG_DIR_C2M));
+    atomic_store(&job->busy, true);
+    atomic_store(&job->owned, true);
+    return esp_timer_start_once(job->timer, job->sequence % 2 ? 20000 : 100);
+}
+#endif

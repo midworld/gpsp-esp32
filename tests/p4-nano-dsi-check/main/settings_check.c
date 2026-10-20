@@ -31,6 +31,9 @@ void gpsp_board_set_display_options(enum gpsp_display_filter filter,
         gpsp_dsi_set_options(filter, color);
 }
 
+bool gpsp_board_stats(void) { return gpsp_dsi_stats_enabled(); }
+void gpsp_board_set_stats(bool enabled) { gpsp_dsi_set_stats(enabled); }
+
 int gpsp_board_audio_volume_step(int step) { (void)step; return INT_MIN; }
 void gpsp_board_video_frameskip(int frameskip) { (void)frameskip; }
 void gpsp_board_ui_draw(unsigned y0, unsigned y1)

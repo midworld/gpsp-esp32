@@ -1,12 +1,26 @@
 # OSPTEK P4C5
 
 - ESP32-P4 v3.x, 16 MiB flash, 32 MiB PSRAM, ESP32-C5.
-- PSRAM clock: 200 MHz.
+- CPU clock: 400 MHz; PSRAM clock: 250 MHz.
 - USB and DSI diagnostic summaries: every 5 seconds while active.
 - Carrier reference: V1.3; panel: YDP430BT009-V1, ST7102.
 - `board.c`: wiring and available hardware.
 - `sdkconfig.defaults`: default panel and enabled services.
 - Display: native 480x800, landscape 800x480; game 3x, UI 2x.
+- Nearest and LCD Grid use two SRAM tiles and DMA2D, with PIE scaling
+  and fused grid shading. A tile waits only before reuse.
+- `CONFIG_GPSP_LCD_DSI_TILE_8` is the default. Tile choices:
+
+  | Source rows | Tile SRAM total | Copies per frame |
+  | --- | --- | --- |
+  | 8 | 45 KiB | 30 |
+  | 12 | 67.5 KiB | 20 |
+  | 16 | 90 KiB | 15 |
+
+- `CONFIG_GPSP_LCD_DSI_CPU_ROTATE` replaces integer-mode PPA rotation
+  with CPU1 PIE transposes. OSPTEK enables it with 8-row tiles by default.
+  It reuses tile storage; bilinear and UI retain PPA.
+- Asterix state 0 measurements: [integer scaling](../../docs/benchmark.md#asterix-state-0).
 - Touch and camera input are not implemented.
 - Ethernet is disabled; Wi-Fi uses the existing ESP-Hosted C5 firmware.
 
@@ -21,6 +35,8 @@
 
 - SD card power is supplied by the carrier's 3.3 V rail.
 - Use the UART connector with the serial switch set to P4 for flashing.
+- For SD builds, set `-D GPSP_ROM_PATH=` to omit the flash ROM image.
+- Use `app-flash` for code updates; include `bootloader-flash` when needed.
 - The USB-A host shares a hardware USB mux with the USB data Type-C port.
   Leave the data Type-C port disconnected when using a gamepad.
 - Board and display selection are separate. Choose the connected DSI

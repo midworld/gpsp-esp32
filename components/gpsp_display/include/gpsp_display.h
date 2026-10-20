@@ -37,4 +37,11 @@ void gpsp_display_expand(uint16_t *output, const uint16_t *input,
         unsigned width, unsigned height, unsigned pitch, unsigned scale,
         int grid_x, int grid_y, const uint16_t *lut);
 
+/* Rotate and expand columns of a 240x160 source into a 480-wide tile.
+   First and rows are multiples of four; output holds rows * 3 lines.
+   Temporary source pixels share the unused end of the output tile. */
+void gpsp_display_rotate_expand(uint16_t *output, const uint16_t *input,
+        unsigned first, unsigned rows, bool rotate_180,
+        int grid_x, int grid_y, const uint16_t *lut);
+
 #endif

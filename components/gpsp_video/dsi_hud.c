@@ -29,7 +29,7 @@
 #define HUD_PIXELS (HUD_BAR_PIXELS * 2)
 #define HUD_BYTES (HUD_PIXELS * sizeof(uint32_t))
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
-#define HUD_FIELDS 4
+#define HUD_FIELDS 5
 
 struct hud_times
 {
@@ -70,11 +70,12 @@ static void hud_profile_log(void)
             continue;
         ESP_LOGI("gpsp_hud", "STAT profile on=%u samples=%u "
                 "ppa_avg_us=%u expand_avg_us=%u present_avg_us=%u "
-                "blend_avg_us=%u blend_max_us=%u", enabled, t->count,
+                "blend_avg_us=%u blend_max_us=%u dma_wait_avg_us=%u", enabled, t->count,
                 (unsigned)(t->total[0] / t->count),
                 (unsigned)(t->total[1] / t->count),
                 (unsigned)(t->total[2] / t->count),
-                (unsigned)(t->total[3] / t->count), t->max[3]);
+                (unsigned)(t->total[3] / t->count), t->max[3],
+                (unsigned)(t->total[4] / t->count));
     }
     if (s_build_count)
         ESP_LOGI("gpsp_hud", "STAT cache updates=%u avg_us=%u max_us=%u",
@@ -253,9 +254,9 @@ esp_err_t gpsp_dsi_hud_draw(uint16_t *frame)
 
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
 void gpsp_dsi_hud_sample(bool enabled, unsigned ppa, unsigned expand,
-        unsigned present, unsigned blend)
+        unsigned present, unsigned blend, unsigned copy)
 {
-    const unsigned values[HUD_FIELDS] = {ppa, expand, present, blend};
+    const unsigned values[HUD_FIELDS] = {ppa, expand, present, blend, copy};
     struct hud_times *times = &s_times[enabled];
 
     portENTER_CRITICAL(&s_lock);

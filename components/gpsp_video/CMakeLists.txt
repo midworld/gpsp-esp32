@@ -12,6 +12,6 @@ else()
         REQUIRED_IDF_TARGETS esp32p4
         REQUIRES gpsp_display
         PRIV_REQUIRES gpsp_devices gpsp gpsp_font esp_driver_gpio
-            esp_driver_spi esp_driver_ppa esp_lcd esp_mm esp_timer
+            esp_driver_spi esp_driver_ppa esp_driver_dma esp_lcd esp_mm esp_timer
     )
 endif()

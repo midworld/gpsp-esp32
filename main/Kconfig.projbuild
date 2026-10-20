@@ -277,6 +277,44 @@ menu "gpSP LCD"
             Expand eight RGB565 pixels at a time for nearest and LCD grid.
             Bilinear stays on PPA. Disable for emulator models without PIE.
 
+    config GPSP_LCD_DSI_DMA_EXPAND
+        bool "Copy integer scaling tiles from SRAM with DMA2D"
+        depends on GPSP_LCD_DSI
+        default n
+        help
+            Expand game pixels in a small internal SRAM tile, then copy
+            to the display buffer with DMA2D. Bilinear and UI are unchanged.
+            Disable for peripheral models without DMA2D copy support.
+
+    choice GPSP_LCD_DSI_TILE_SIZE
+        prompt "Integer scaling tile rows"
+        depends on GPSP_LCD_DSI_DMA_EXPAND
+        default GPSP_LCD_DSI_TILE_8
+
+        config GPSP_LCD_DSI_TILE_8
+            bool "8 rows (45 KiB SRAM, 30 copies per frame)"
+        config GPSP_LCD_DSI_TILE_12
+            bool "12 rows (67.5 KiB SRAM, 20 copies per frame)"
+        config GPSP_LCD_DSI_TILE_16
+            bool "16 rows (90 KiB SRAM, 15 copies per frame)"
+    endchoice
+
+    config GPSP_LCD_DSI_TILE_ROWS
+        int
+        default 12 if GPSP_LCD_DSI_TILE_12
+        default 16 if GPSP_LCD_DSI_TILE_16
+        default 8
+
+    config GPSP_LCD_DSI_CPU_ROTATE
+        bool "Rotate integer scaling tiles on CPU1"
+        depends on GPSP_LCD_DSI_DMA_EXPAND
+        default n
+        help
+            Transpose source blocks while preparing scaling tiles. Reuse
+            the tile storage instead of the PPA rotation buffer. This adds
+            CPU1 work; compare against PPA rotation on the target board.
+            Bilinear and UI keep PPA rotation.
+
     config GPSP_LCD_DSI_DIAGNOSTICS
         bool "Log DSI frame timing summaries"
         depends on GPSP_LCD_DSI
@@ -286,6 +324,7 @@ menu "gpSP LCD"
             Sample one in 16 game frames and report phase timings every
             10 seconds, grouped by STAT on/off. Include PPA blend and
             text-cache update costs. Logging runs on the status worker.
+            Report CPU0 execution and pacing wait every 2 seconds.
 
     config GPSP_LCD_SPI_MHZ
         int "SPI clock (MHz)"

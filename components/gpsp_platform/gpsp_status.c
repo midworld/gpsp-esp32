@@ -27,6 +27,9 @@
 
 #include "gpsp_frame_stats.h"
 #include "gpsp_profile.h"
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+#include "gpsp_board.h"
+#endif
 
 #if CONFIG_GPSP_LCD
 #include "gpsp_lcd.h"
@@ -174,6 +177,48 @@ static unsigned gpsp_status_cpu(int core, configRUN_TIME_COUNTER_TYPE *idle,
     return 100u - (unsigned)((uint64_t)idle_us * 100u / elapsed_us);
 }
 
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+static void gpsp_status_frame_profile(void)
+{
+    struct gpsp_profile_window window;
+    enum gpsp_display_filter filter;
+    enum gpsp_display_color color;
+
+    gpsp_profile_take_frame(esp_timer_get_time(), &window);
+    if (!window.start_us || !window.run.count)
+        return;
+    gpsp_board_display_options(&filter, &color);
+    ESP_LOGI(TAG, "DSI CPU0 filter=%u color=%u stat=%u frames=%u "
+            "run_avg_us=%u run_max_us=%u wait_avg_us=%u wait_max_us=%u",
+            (unsigned)filter, (unsigned)color, gpsp_board_stats(),
+            (unsigned)window.run.count,
+            (unsigned)(window.run.total_us / window.run.count),
+            (unsigned)window.run.max_us,
+            (unsigned)(window.wait.total_us / window.wait.count),
+            (unsigned)window.wait.max_us);
+}
+#endif
+
+static void gpsp_status_slow_frames(void)
+{
+    struct gpsp_slow_window window;
+
+    gpsp_profile_take_slow(&window);
+    if (!window.count)
+        return;
+    const struct gpsp_slow_frame *f = &window.worst;
+
+    ESP_LOGW(TAG, "SLOW count=%u avg_us=%u worst_frame=%u run_us=%u "
+            "render_us=%u translated=%u translate_us=%u upkeep_us=%u "
+            "rom_pages=%u rom_reloads=%u rom_remaps=%u rom_load_us=%u",
+            (unsigned)window.count, (unsigned)(window.total_us / window.count),
+            (unsigned)f->frame, (unsigned)f->run_us, (unsigned)f->render_us,
+            (unsigned)f->translated, (unsigned)f->translate_us,
+            (unsigned)f->upkeep_us, (unsigned)f->rom_pages,
+            (unsigned)f->rom_reloads, (unsigned)f->rom_remaps,
+            (unsigned)f->rom_load_us);
+}
+
 static void gpsp_status_task(void *arg)
 {
     configRUN_TIME_COUNTER_TYPE idle[GPSP_STATUS_CORES];
@@ -268,6 +313,10 @@ static void gpsp_status_task(void *arg)
                 (unsigned)((psram_used * 10 + 524288) / 1048576),
                 (unsigned)(psram_size / 1048576));
 #endif
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+        gpsp_status_frame_profile();
+#endif
+        gpsp_status_slow_frames();
     }
 
     s_task = NULL;
