@@ -200,11 +200,63 @@ static void pad_update(unsigned region, uint32_t mask)
     s_masks[region] = mask;
 }
 
-esp_err_t gpsp_dsi_pad_draw(uint16_t *frame, uint32_t state)
+/* Omit the transparent corners of the cross and the gap between A and B. */
+static esp_err_t pad_blend(uint16_t *frame, unsigned region, unsigned opacity,
+        unsigned first, unsigned last)
+{
+    static const struct gpsp_pad_rect dpad[] = {
+        {72, 0, 72, 216}, {0, 72, 72, 72}, {144, 72, 72, 72},
+    };
+    static const struct gpsp_pad_rect ab[] = {
+        {116, 0, 116, 116}, {0, 90, 116, 116},
+    };
+    const struct gpsp_pad_rect *r = &gpsp_pad_rects[region];
+    const struct gpsp_pad_rect whole = {0, 0, r->width, r->height};
+    const struct gpsp_pad_rect *parts = &whole;
+    unsigned count = 1;
+
+    if (region == GPSP_PAD_DPAD)
+    {
+        parts = dpad;
+        count = sizeof(dpad) / sizeof(dpad[0]);
+    }
+    else if (region == GPSP_PAD_AB)
+    {
+        parts = ab;
+        count = sizeof(ab) / sizeof(ab[0]);
+    }
+    for (unsigned i = 0; i < count; i++)
+    {
+        const struct gpsp_pad_rect *p = &parts[i];
+#if CONFIG_GPSP_LCD_ROTATE_180
+        unsigned sx = r->height - p->y - p->height, sy = p->x;
+        unsigned x = 480 - r->y - r->height + sx, y = r->x + sy;
+#else
+        unsigned sx = p->y, sy = r->width - p->x - p->width;
+        unsigned x = r->y + sx, y = 800 - r->x - r->width + sy;
+#endif
+        unsigned top = y < first ? first : y;
+        unsigned bottom = y + p->width > last ? last : y + p->width;
+
+        if (top >= bottom)
+            continue;
+        const struct dsi_overlay_crop crop = {
+            s_tiles[region], r->height, r->width, sx, sy + top - y,
+        };
+        esp_err_t result = gpsp_dsi_blend_overlay_crop(frame, &crop,
+                p->height, bottom - top, x, top, opacity);
+
+        if (result != ESP_OK)
+            return result;
+    }
+    return ESP_OK;
+}
+
+esp_err_t gpsp_dsi_pad_draw(uint16_t *frame, uint32_t state, unsigned opacity,
+        unsigned first, unsigned last)
 {
     if (!(state & GPSP_VIRTUAL_PAD_VISIBLE))
         return ESP_OK;
-    unsigned opacity = gpsp_dsi_pad_opacity();
     if (!s_tiles[0])
     {
         esp_err_t result = pad_prepare();
@@ -220,7 +272,6 @@ esp_err_t gpsp_dsi_pad_draw(uint16_t *frame, uint32_t state)
 #endif
     for (unsigned region = 0; region < GPSP_PAD_REGIONS; region++)
     {
-        const struct gpsp_pad_rect *r = &gpsp_pad_rects[region];
         uint32_t mask = state & s_region_masks[region];
         bool build = s_masks[region] != mask;
         if (build)
@@ -234,16 +285,10 @@ esp_err_t gpsp_dsi_pad_draw(uint16_t *frame, uint32_t state)
             updates++;
 #endif
         }
-#if CONFIG_GPSP_LCD_ROTATE_180
-        unsigned x = 480 - r->y - r->height, y = r->x;
-#else
-        unsigned x = r->y, y = 800 - r->x - r->width;
-#endif
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
         int64_t start = esp_timer_get_time();
 #endif
-        esp_err_t result = gpsp_dsi_blend_overlay_alpha(frame, s_tiles[region],
-                r->height, r->width, x, y, opacity);
+        esp_err_t result = pad_blend(frame, region, opacity, first, last);
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
         blend_us += esp_timer_get_time() - start;
 #endif

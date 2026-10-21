@@ -14,6 +14,9 @@
   static-menu refresh, and setting persistence. Touch contacts are synthetic;
   physical touch needs a separate check. Pad timing excludes initial cache creation
   and reports p50/p95/p99/max for steady and changing button states.
+- Compares cropped controls with the original seven full PPA rectangles at
+  25/50/100% opacity. Checks changing backgrounds and cached borders on all buffers.
+  Opacity changes must refresh all three buffers without accumulating alpha.
 - Runs display checks on CPU1; UI retains PPA processing.
 - Previous OSPTEK P4 v3.2 hardware checks passed with PIE enabled:
   exact nearest/grid pixels,

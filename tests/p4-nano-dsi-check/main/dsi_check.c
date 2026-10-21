@@ -15,6 +15,7 @@
 #include "libretro.h"
 /* Inspect output buffers without adding a firmware diagnostic API. */
 #include "../../../components/gpsp_video/dsi.c"
+#include "../../../components/gpsp_video/dsi_pad.c"
 
 #if CONFIG_DSI_CHECK_MODEL
 void display_model_fail_init(void);
@@ -163,10 +164,71 @@ static int compare_time(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
+static void pad_background(uint16_t *frame, unsigned border, unsigned seed,
+        bool clear)
+{
+    if (clear)
+        memset(frame, 0, DSI_BYTES);
+    for (unsigned y = border; y < DSI_HEIGHT - border; y++)
+        for (unsigned x = 0; x < DSI_WIDTH; x++)
+            frame[y * DSI_WIDTH + x] =
+                    (uint16_t)((y * DSI_WIDTH + x) * 25173u + seed * 13849u);
+    ESP_ERROR_CHECK(esp_cache_msync(frame, DSI_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M));
+}
+
+static void check_pad_crops(void)
+{
+    uint16_t *expected = heap_caps_aligned_alloc(64, DSI_BYTES,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    uint16_t *actual = heap_caps_aligned_alloc(64, DSI_BYTES,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    const unsigned masks[] = {0, BUTTON(LEFT), BUTTON(RIGHT),
+        BUTTON(UP) | BUTTON(LEFT), BUTTON(DOWN) | BUTTON(RIGHT),
+        BUTTON(A) | BUTTON(B), BUTTON(L) | BUTTON(R),
+        0xffffu | GPSP_VIRTUAL_PAD_HOME};
+    unsigned checked = 0;
+
+    assert(expected && actual);
+    for (unsigned opacity = 25; opacity <= 100; opacity *= 2)
+        for (unsigned border = 40; border <= 80; border += 40)
+            for (unsigned state = 0; state < sizeof(masks) / sizeof(masks[0]); state++)
+                for (unsigned repeat = 0; repeat < 2; repeat++)
+                {
+                    unsigned seed = state * 4 + repeat;
+
+                    pad_background(expected, border, seed, true);
+                    pad_background(actual, border, seed, !repeat);
+                    ESP_ERROR_CHECK(gpsp_dsi_pad_draw(actual,
+                            masks[state] | GPSP_VIRTUAL_PAD_VISIBLE, opacity,
+                            repeat ? border : 0,
+                            repeat ? DSI_HEIGHT - border : DSI_HEIGHT));
+                    /* The reference blends the original seven whole rectangles. */
+                    for (unsigned i = 0; i < GPSP_PAD_REGIONS; i++)
+                    {
+                        const struct gpsp_pad_rect *r = &gpsp_pad_rects[i];
+#if CONFIG_GPSP_LCD_ROTATE_180
+                        unsigned x = DSI_WIDTH - r->y - r->height, y = r->x;
+#else
+                        unsigned x = r->y, y = DSI_HEIGHT - r->x - r->width;
+#endif
+                        ESP_ERROR_CHECK(gpsp_dsi_blend_overlay_alpha(expected,
+                                s_tiles[i], r->height, r->width, x, y, opacity));
+                    }
+                    assert(memcmp(expected, actual, DSI_BYTES) == 0);
+                    checked++;
+                    vTaskDelay(1);
+                }
+    heap_caps_free(expected);
+    heap_caps_free(actual);
+    printf("DSI_CHECK pad crops: %u exact frames, all opacities and game/UI borders pass\n",
+            checked);
+}
+
 static void check_virtual_pad(uint16_t *input, uint16_t *ui)
 {
     uint16_t *baseline = heap_caps_malloc(DSI_BYTES, MALLOC_CAP_SPIRAM);
-    assert(baseline);
+    uint16_t *steady = heap_caps_malloc(DSI_BYTES, MALLOC_CAP_SPIRAM);
+    assert(baseline && steady);
     for (unsigned i = 0; i < 320 * 240; i++)
         ui[i] = (uint16_t)(i * 7919);
     gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_OFF);
@@ -187,6 +249,7 @@ static void check_virtual_pad(uint16_t *input, uint16_t *ui)
             s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE | masks[held];
             ESP_ERROR_CHECK(gpsp_dsi_draw(source, is_ui));
             const uint16_t *shown = last_frame();
+            memcpy(steady, shown, DSI_BYTES);
             assert(landscape_pixel(shown, 0, 346) != 0);
             assert(landscape_pixel(shown, 799, 306) != 0);
             for (unsigned y = 0; y < 480; y++)
@@ -194,6 +257,11 @@ static void check_virtual_pad(uint16_t *input, uint16_t *ui)
                     if (!in_pad_region(x, y))
                         assert(landscape_pixel(shown, x, y) ==
                                 landscape_pixel(baseline, x, y));
+            for (unsigned repeat = 0; repeat < DSI_BUFFERS * 2; repeat++)
+            {
+                ESP_ERROR_CHECK(gpsp_dsi_draw(source, is_ui));
+                assert(memcmp(steady, last_frame(), DSI_BYTES) == 0);
+            }
         }
         s_test_touch = 0;
         for (unsigned i = 0; i < DSI_BUFFERS + 1; i++)
@@ -211,9 +279,15 @@ static void check_virtual_pad(uint16_t *input, uint16_t *ui)
     {
         gpsp_dsi_set_pad_opacity(opacities[i]);
         ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+        memcpy(steady, last_frame(), DSI_BYTES);
         levels[i] = landscape_pixel(last_frame(), 0, 346);
         assert(landscape_pixel(last_frame(), 0, 0) != 0);
         assert(landscape_pixel(last_frame(), 799, 0) != 0);
+        for (unsigned repeat = 0; repeat < DSI_BUFFERS * 2; repeat++)
+        {
+            ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
+            assert(memcmp(steady, last_frame(), DSI_BYTES) == 0);
+        }
     }
     assert(levels[0] && levels[0] < levels[1] && levels[1] < levels[2]);
     uint16_t top = landscape_pixel(last_frame(), 100, 0);
@@ -254,7 +328,8 @@ static void check_virtual_pad(uint16_t *input, uint16_t *ui)
                 state |= (1u << RETRO_DEVICE_ID_JOYPAD_UP) |
                         (1u << RETRO_DEVICE_ID_JOYPAD_A);
             int64_t start = esp_timer_get_time();
-            ESP_ERROR_CHECK(gpsp_dsi_pad_draw(s_frames[s_next], state));
+            ESP_ERROR_CHECK(gpsp_dsi_pad_draw(s_frames[s_next], state,
+                    gpsp_dsi_pad_opacity(), 0, DSI_HEIGHT));
             if (i >= 10)
                 (pass ? changing : idle)[i - 10] = esp_timer_get_time() - start;
         }
@@ -266,6 +341,7 @@ static void check_virtual_pad(uint16_t *input, uint16_t *ui)
             "changing p50=%u p95=%u p99=%u max=%u\n", idle[49], idle[94],
             idle[98], idle[99], changing[49], changing[94], changing[98], changing[99]);
     heap_caps_free(baseline);
+    heap_caps_free(steady);
     puts("DSI_CHECK virtual pad: game/UI bounds, border cleanup, idle UI refresh pass");
     puts("DSI_CHECK pad opacity: 25/50/100, top edges, Stats on top pass");
 }
@@ -745,6 +821,7 @@ static void display_check(void *arg)
     }
     check_effects(input, ui);
     check_stats(input, ui);
+    check_pad_crops();
     check_virtual_pad(input, ui);
 #if CONFIG_DSI_CHECK_MODEL
     check_menu_allocations(&ui);

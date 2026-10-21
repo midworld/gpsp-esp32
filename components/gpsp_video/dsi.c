@@ -51,6 +51,8 @@ static ppa_client_handle_t s_game_ppa;
 static ppa_client_handle_t s_ui_ppa;
 static ppa_client_handle_t s_overlay_ppa;
 static bool s_pad_borders[DSI_BUFFERS];
+static uint32_t s_pad_state[DSI_BUFFERS];
+static unsigned s_pad_opacity[DSI_BUFFERS];
 static SemaphoreHandle_t s_frame_done;
 static void *s_frames[DSI_BUFFERS];
 static unsigned s_widths[DSI_BUFFERS];
@@ -283,6 +285,15 @@ esp_err_t gpsp_dsi_blend_overlay(uint16_t *frame, const uint32_t *foreground,
 esp_err_t gpsp_dsi_blend_overlay_alpha(uint16_t *frame, const uint32_t *foreground,
         unsigned width, unsigned height, unsigned x, unsigned y, unsigned opacity)
 {
+    const struct dsi_overlay_crop crop = {foreground, width, height, 0, 0};
+
+    return gpsp_dsi_blend_overlay_crop(frame, &crop, width, height, x, y, opacity);
+}
+
+esp_err_t gpsp_dsi_blend_overlay_crop(uint16_t *frame,
+        const struct dsi_overlay_crop *crop, unsigned width, unsigned height,
+        unsigned x, unsigned y, unsigned opacity)
+{
     if (!opacity || opacity > 100)
         return ESP_ERR_INVALID_ARG;
     const ppa_blend_oper_config_t operation = {
@@ -294,9 +305,10 @@ esp_err_t gpsp_dsi_blend_overlay_alpha(uint16_t *frame, const uint32_t *foregrou
             .blend_cm = PPA_BLEND_COLOR_MODE_RGB565,
         },
         .in_fg = {
-            .buffer = foreground,
-            .pic_w = width, .pic_h = height,
+            .buffer = crop->pixels,
+            .pic_w = crop->pitch, .pic_h = crop->rows,
             .block_w = width, .block_h = height,
+            .block_offset_x = crop->x, .block_offset_y = crop->y,
             .blend_cm = PPA_BLEND_COLOR_MODE_ARGB8888,
         },
         .out = {
@@ -529,6 +541,11 @@ static esp_err_t dsi_draw(const uint16_t *pixels, bool ui,
         .mode = PPA_TRANS_MODE_BLOCKING,
     };
 
+    unsigned opacity = gpsp_dsi_pad_opacity();
+    bool reuse_borders = (pad & GPSP_VIRTUAL_PAD_VISIBLE) &&
+            s_pad_borders[s_next] && s_widths[s_next] == width &&
+            s_pad_state[s_next] == pad && s_pad_opacity[s_next] == opacity;
+
     if (s_widths[s_next] != width)
     {
         /* Game and UI borders differ; clear each buffer on a transition. */
@@ -543,9 +560,9 @@ static esp_err_t dsi_draw(const uint16_t *pixels, bool ui,
         }
         s_widths[s_next] = width;
     }
-    else if (s_pad_borders[s_next])
+    else if (s_pad_borders[s_next] && !reuse_borders)
     {
-        /* Controls reach into the black side borders, outside the next image. */
+        /* Refresh borders only when their controls or opacity changed. */
         unsigned bytes = offset_y * DSI_WIDTH * sizeof(uint16_t);
         uint8_t *frame = (uint8_t *)s_frames[s_next];
         memset(frame, 0, bytes);
@@ -631,11 +648,19 @@ static esp_err_t dsi_draw(const uint16_t *pixels, bool ui,
     if (sample)
         expand_end = esp_timer_get_time();
 #endif
-    esp_err_t pad_result = gpsp_dsi_pad_draw(s_frames[s_next], pad);
+    esp_err_t pad_result = gpsp_dsi_pad_draw(s_frames[s_next], pad, opacity,
+            reuse_borders ? offset_y : 0,
+            reuse_borders ? DSI_HEIGHT - offset_y : DSI_HEIGHT);
     if (pad_result != ESP_OK)
     {
+        s_pad_opacity[s_next] = 0;
         gpsp_touch_set_enabled(false);
         ESP_LOGW(TAG, "Virtual pad disabled: %s", esp_err_to_name(pad_result));
+    }
+    else
+    {
+        s_pad_state[s_next] = pad;
+        s_pad_opacity[s_next] = opacity;
     }
     if (overlay)
         ESP_RETURN_ON_ERROR(gpsp_dsi_blend_overlay(s_frames[s_next], overlay,

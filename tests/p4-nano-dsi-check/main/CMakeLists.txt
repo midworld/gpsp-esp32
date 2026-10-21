@@ -7,7 +7,6 @@ idf_component_register(
         "../../../components/gpsp_devices/i2c_bus.c"
         "../../../components/gpsp_video/spi.c"
         "../../../components/gpsp_video/dsi_hud.c"
-        "../../../components/gpsp_video/dsi_pad.c"
         "../../../components/gpsp_devices/virtual_pad.c"
         "../../../components/gpsp_video/panels/waveshare_dsi.c"
         "../../../components/gpsp_video/panels/osptek_ydp430bt009.c"
