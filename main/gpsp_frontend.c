@@ -50,10 +50,12 @@ static bool s_menu_pending;
 static bool s_input_blocked;
 #endif
 static uint32_t s_frame_count;
+#if CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
 static uint32_t s_report_frame_count;
 /* Core frames, drawn or skipped, at the report start. */
 static uint32_t s_report_run_count;
 static int64_t s_report_start_us;
+#endif
 
 #if CONFIG_GPSP_BENCHMARK
 #define GPSP_BENCHMARK_FRAME_COUNT CONFIG_GPSP_BENCHMARK_FRAMES
@@ -350,6 +352,7 @@ static bool gpsp_environment(unsigned command, void *data)
     }
 }
 
+#if CONFIG_GPSP_BENCHMARK || CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
 static uint32_t gpsp_frame_checksum(
         const uint8_t *pixels, unsigned width, unsigned height, size_t pitch)
 {
@@ -371,6 +374,7 @@ static uint32_t gpsp_frame_checksum(
 
     return checksum;
 }
+#endif
 
 #if CONFIG_GPSP_BENCHMARK
 static void gpsp_benchmark_add(struct gpsp_benchmark_window *window,
@@ -1124,7 +1128,7 @@ static void gpsp_benchmark_free(void)
    deadline. A table rehash can still take longer on large tables. */
 #define GPSP_JIT_UPKEEP_SLACK_US 10000
 
-#if CONFIG_GPSP_STATUS
+#if CONFIG_GPSP_STATUS && CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
 /* GBA frame period: 280,896 cycles at 16,777,216 Hz. */
 #define GPSP_FRAME_PERIOD_US 16743u
 
@@ -1199,7 +1203,7 @@ static void gpsp_unload_game(void)
 static void gpsp_video_refresh(
         const void *data, unsigned width, unsigned height, size_t pitch)
 {
-#if !CONFIG_GPSP_BENCHMARK
+#if CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
     uint32_t report_frames;
     int64_t report_time_us;
     int64_t now_us;
@@ -1230,7 +1234,7 @@ static void gpsp_video_refresh(
     s_benchmark_height = height;
     s_benchmark_pitch = pitch;
     return;
-#else
+#elif CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
     now_us = esp_timer_get_time();
 
     if (s_frame_count == 1)
@@ -1596,9 +1600,11 @@ esp_err_t gpsp_frontend_run(const char *rom_path)
     last_idle_yield_us = (int64_t)next_frame_us;
 #endif
     s_frame_count = 0;
+#if CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
     s_report_frame_count = 0;
     s_report_run_count = gpsp_profile_frames();
     s_report_start_us = esp_timer_get_time();
+#endif
 #if CONFIG_GPSP_BENCHMARK
     s_benchmark_pixels = NULL;
     s_benchmark_images = heap_caps_malloc(
@@ -1779,7 +1785,7 @@ esp_err_t gpsp_frontend_run(const char *rom_path)
             upkeep_us = (uint32_t)(upkeep_end_us - run_end_us);
             run_end_us = upkeep_end_us;
         }
-#if CONFIG_GPSP_STATUS
+#if CONFIG_GPSP_STATUS && CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
         gpsp_slow_frame_note((uint32_t)(run_end_us - run_start_us), upkeep_us);
 #endif
 #if CONFIG_GPSP_BENCHMARK

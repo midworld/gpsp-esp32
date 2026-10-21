@@ -69,7 +69,7 @@ static uint32_t s_frame_count;
 static const void *s_benchmark_pixels;
 static unsigned s_benchmark_width, s_benchmark_height;
 static size_t s_benchmark_pitch;
-#else
+#elif CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
 static uint32_t s_report_frame_count, s_report_run_count;
 static int64_t s_report_start_us;
 static const char *TAG = "test_video";

@@ -8,7 +8,7 @@
 - Checks automatic ROM limits around 16 MiB PSRAM and a fixed build override.
 - Compiles the production video callbacks and LCD queue operations with a
   controlled worker. Checks buffer exhaustion, dropped frames, recovery,
-  skipped frames, and 32 game unloads in normal and benchmark builds.
+  skipped frames, and 32 game unloads in light, detailed and benchmark builds.
 - Video ownership checks use AddressSanitizer and UndefinedBehaviorSanitizer.
 - ESP-EMU menu: the unchanged menu picture goes again to a new or
   reconnected viewer and after a failed send, and stops when the menu closes.

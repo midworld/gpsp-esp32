@@ -91,6 +91,10 @@ if(CONFIG_GPSP_BENCHMARK)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE GPSP_BENCHMARK=1)
 endif()
 
+if(CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE GPSP_PERFORMANCE_DIAGNOSTICS=1)
+endif()
+
 # RAM code diagnostics are shared with the benchmark frontend.
 if(CONFIG_GPSP_BENCHMARK)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC GPSP_BENCHMARK_RAM_CODE=1)

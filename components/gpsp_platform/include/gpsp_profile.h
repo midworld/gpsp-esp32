@@ -37,7 +37,7 @@ uint32_t gpsp_profile_frames(void);
 void gpsp_profile_record_copy(uint32_t duration_us);
 void gpsp_profile_record_send(uint32_t duration_us);
 void gpsp_profile_take(int64_t now_us, struct gpsp_profile_window *window);
-#if CONFIG_GPSP_STATUS
+#if CONFIG_GPSP_STATUS && CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
 struct gpsp_slow_frame
 {
     uint32_t frame, run_us, render_us, translated, translate_us, upkeep_us;

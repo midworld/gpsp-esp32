@@ -123,8 +123,9 @@ with tempfile.TemporaryDirectory(prefix="gpsp-board-") as folder:
 
     build = Path(folder) / "video-buffers"
     video_sources(build)
-    for benchmark in (0, 1):
+    for benchmark, detailed in ((0, 0), (0, 1), (1, 0)):
         command = compile_test(build, "test_video.c", None)
         subprocess.run(command + [f"-DCONFIG_GPSP_BENCHMARK={benchmark}",
+                                  f"-DCONFIG_GPSP_PERFORMANCE_DIAGNOSTICS={detailed}",
                                   "-fsanitize=address,undefined"], check=True)
         subprocess.run([str(build / "test")], check=True)

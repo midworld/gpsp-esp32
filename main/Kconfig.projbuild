@@ -226,6 +226,21 @@ menu "gpSP SD card"
 
 endmenu
 
+menu "gpSP performance"
+
+    config GPSP_PERFORMANCE_DIAGNOSTICS
+        bool "Enable detailed performance diagnostics"
+        depends on !GPSP_BENCHMARK
+        default y if ESPEMU
+        default n
+        help
+            Enable periodic frame checksums, JIT logs and slow-frame details.
+            Leave disabled for light measurement: keep frame counts and LCD
+            Stats without per-frame detail collection or performance logs.
+            Transport timing and explicit task dumps remain available.
+
+endmenu
+
 menu "gpSP LCD"
     depends on IDF_TARGET_ESP32P4 && !ESPEMU
 
@@ -317,7 +332,7 @@ menu "gpSP LCD"
 
     config GPSP_LCD_DSI_DIAGNOSTICS
         bool "Log DSI frame timing summaries"
-        depends on GPSP_LCD_DSI
+        depends on GPSP_LCD_DSI && GPSP_STATUS && GPSP_PERFORMANCE_DIAGNOSTICS
         default n
         help
             Log frame counts and peak render/present times every 5 seconds.
@@ -432,8 +447,9 @@ menu "gpSP status"
         select FREERTOS_USE_STATS_FORMATTING_FUNCTIONS
         select FREERTOS_VTASKLIST_INCLUDE_COREID
         help
-            Logs a STAT line every 2 seconds and shows the values in the
-            LCD borders. The host viewer's F2 prints a per-task table.
+            Updates LCD Stats every 2 seconds. Detailed performance
+            diagnostics also logs the values. Without an LCD, log the
+            values instead. F2 prints a per-task table.
 
 endmenu
 

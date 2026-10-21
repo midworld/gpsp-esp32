@@ -17,7 +17,7 @@ static struct gpsp_profile_window s_window;
 static struct gpsp_profile_window s_frame_window;
 #endif
 static atomic_uint s_frames;
-#if CONFIG_GPSP_STATUS
+#if CONFIG_GPSP_STATUS && CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
 static struct gpsp_slow_window s_slow;
 
 void gpsp_profile_record_slow(const struct gpsp_slow_frame *frame)
@@ -59,14 +59,20 @@ void gpsp_profile_reset(int64_t now_us)
 
 void gpsp_profile_record_frame(uint32_t run_us, uint32_t wait_us)
 {
-    portENTER_CRITICAL(&s_profile_lock);
-    gpsp_profile_record(&s_window.run, run_us);
-    gpsp_profile_record(&s_window.wait, wait_us);
-#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
-    gpsp_profile_record(&s_frame_window.run, run_us);
-    gpsp_profile_record(&s_frame_window.wait, wait_us);
+    /* A local display needs only the frame count in light mode. */
+#if !CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS && CONFIG_GPSP_LCD && !CONFIG_GPSP_BENCHMARK
+    if (CONFIG_GPSP_SERVER_HOST[0])
 #endif
-    portEXIT_CRITICAL(&s_profile_lock);
+    {
+        portENTER_CRITICAL(&s_profile_lock);
+        gpsp_profile_record(&s_window.run, run_us);
+        gpsp_profile_record(&s_window.wait, wait_us);
+#if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
+        gpsp_profile_record(&s_frame_window.run, run_us);
+        gpsp_profile_record(&s_frame_window.wait, wait_us);
+#endif
+        portEXIT_CRITICAL(&s_profile_lock);
+    }
     atomic_fetch_add(&s_frames, 1);
 }
 

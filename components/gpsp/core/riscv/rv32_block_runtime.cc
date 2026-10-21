@@ -660,7 +660,7 @@ extern "C" u32 execute_arm_translate(u32 cycles)
       if (completed_frame(next))
       {
         frame_calls++;
-#if !defined(GPSP_BENCHMARK)
+#if !defined(GPSP_BENCHMARK) && defined(GPSP_PERFORMANCE_DIAGNOSTICS)
         if (frame_calls == 1 || frame_calls % 60 == 0)
           gpsp_rv32_log(GPSP_RV32_LOG_INFO, TAG,
               "JIT stats: frames=%u blocks=%llu scalar=%llu "
@@ -945,7 +945,7 @@ extern "C" u32 execute_arm_translate(u32 cycles)
     if (native_frame)
     {
       frame_calls++;
-#if !defined(GPSP_BENCHMARK)
+#if !defined(GPSP_BENCHMARK) && defined(GPSP_PERFORMANCE_DIAGNOSTICS)
       if (frame_calls == 1 || frame_calls % 60 == 0)
         gpsp_rv32_log(GPSP_RV32_LOG_INFO, TAG,
             "JIT stats: frames=%u blocks=%llu scalar=%llu "

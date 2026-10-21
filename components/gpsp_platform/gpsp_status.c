@@ -199,6 +199,7 @@ static void gpsp_status_frame_profile(void)
 }
 #endif
 
+#if CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
 static void gpsp_status_slow_frames(void)
 {
     struct gpsp_slow_window window;
@@ -218,17 +219,22 @@ static void gpsp_status_slow_frames(void)
             (unsigned)f->rom_reloads, (unsigned)f->rom_remaps,
             (unsigned)f->rom_load_us);
 }
+#endif
 
 static void gpsp_status_task(void *arg)
 {
     configRUN_TIME_COUNTER_TYPE idle[GPSP_STATUS_CORES];
     int64_t start_us = esp_timer_get_time();
     uint32_t start_frames = gpsp_profile_frames();
+#if CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS || !CONFIG_GPSP_LCD
     uint32_t start_rom[4];
+#endif
 
     (void)arg;
+#if CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS || !CONFIG_GPSP_LCD
     gpsp_rom_page_stats(&start_rom[0], &start_rom[1], &start_rom[2],
             &start_rom[3]);
+#endif
     for (int core = 0; core < GPSP_STATUS_CORES; core++)
         idle[core] = ulTaskGetIdleRunTimeCounterForCore(core);
 
@@ -237,7 +243,6 @@ static void gpsp_status_task(void *arg)
         unsigned cpu[2] = {0, 0};
         float celsius = 0.0f;
         bool have_celsius;
-        char temp_text[12] = "n/a";
         int64_t now_us;
         uint32_t elapsed_us;
         uint32_t frames;
@@ -261,14 +266,16 @@ static void gpsp_status_task(void *arg)
 
         have_celsius = s_sensor &&
                 temperature_sensor_get_celsius(s_sensor, &celsius) == ESP_OK;
-        if (have_celsius)
-            snprintf(temp_text, sizeof(temp_text), "%.1fC", celsius);
-
         size_t sram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         size_t sram_min = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
-        size_t sram_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
         size_t psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+#if CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS || !CONFIG_GPSP_LCD
+        size_t sram_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
         size_t psram_min = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+        char temp_text[12] = "n/a";
+
+        if (have_celsius)
+            snprintf(temp_text, sizeof(temp_text), "%.1fC", celsius);
 
         uint32_t rom[4];
 
@@ -302,6 +309,7 @@ static void gpsp_status_task(void *arg)
                 (unsigned)(sram_min / 1024), (unsigned)(sram_block / 1024),
                 psram / 1048576.0, psram_min / 1048576.0, temp_text, rom_text,
                 audio_text);
+#endif
 #if CONFIG_GPSP_LCD
         /* Used PSRAM includes reserved memory. */
         size_t psram_size = esp_psram_get_size();
@@ -316,7 +324,9 @@ static void gpsp_status_task(void *arg)
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
         gpsp_status_frame_profile();
 #endif
+#if CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS
         gpsp_status_slow_frames();
+#endif
     }
 
     s_task = NULL;
