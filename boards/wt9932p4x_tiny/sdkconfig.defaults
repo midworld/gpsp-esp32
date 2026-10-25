@@ -1,0 +1,9 @@
+# WT9932P4X-TINY: no display, audio codec or radio. Override locally in sdkconfig.
+CONFIG_ESP32P4_REV_MIN_301=y
+CONFIG_SPIRAM_SPEED_250M=y
+CONFIG_CACHE_L2_CACHE_256KB=y
+# The USB-C debug port is the only host link.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_GPSP_SERVER_HOST=""
+CONFIG_GPSP_WIFI_SSID=""
+CONFIG_GPSP_WIFI_PASSWORD=""
