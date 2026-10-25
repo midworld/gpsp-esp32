@@ -14,9 +14,11 @@
 #include "esp_hosted.h"
 #include "esp_netif.h"
 #include "esp_psram.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "sample_wifi.h"
+#include "sd_check.h"
 
 #ifdef CONFIG_P4_NANO_WIFI_SPEED_TEST
 #include "freertos/FreeRTOS.h"
@@ -27,7 +29,12 @@
 #define MIB (1024U * 1024U)
 #define EXPECTED_PSRAM (32U * MIB)
 #define EXPECTED_FLASH (16U * MIB)
-#define RAM_TEST_SIZE MIB
+
+#ifdef CONFIG_P4_NANO_BOARD_WT9932P4X_TINY
+#define BOARD_NAME "WT9932P4X-TINY"
+#else
+#define BOARD_NAME "ESP32-P4-NANO-WIFI6-DB"
+#endif
 
 static void report(const char *name, int pass)
 {
@@ -48,31 +55,60 @@ static int check_chip(void)
     return pass;
 }
 
+static unsigned mib_per_s(size_t bytes, int64_t us)
+{
+    return us > 0 ? (unsigned)((uint64_t)bytes * 1000000U / MIB / us) : 0;
+}
+
+/* Address-dependent values catch shorted or stuck address lines. The test
+ * block is much larger than the cache, so verify reads come from PSRAM. */
+static int psram_pattern(uint32_t *ram, size_t words, uint32_t seed)
+{
+    int64_t start = esp_timer_get_time();
+    for (size_t i = 0; i < words; i++)
+        ram[i] = seed ^ ((uint32_t)i * 0x9e3779b1U);
+    int64_t mid = esp_timer_get_time();
+    size_t bad = 0;
+    size_t first = 0;
+    for (size_t i = 0; i < words; i++)
+    {
+        if (ram[i] != (seed ^ ((uint32_t)i * 0x9e3779b1U)))
+        {
+            if (bad++ == 0)
+                first = i;
+        }
+    }
+    int64_t end = esp_timer_get_time();
+    size_t bytes = words * sizeof(*ram);
+    printf("PSRAM pattern 0x%08lx: write=%u MiB/s verify=%u MiB/s "
+            "errors=%u\n", (unsigned long)seed, mib_per_s(bytes, mid - start),
+            mib_per_s(bytes, end - mid), (unsigned)bad);
+    if (bad != 0)
+        printf("PSRAM first mismatch at offset 0x%08x\n",
+                (unsigned)(first * sizeof(*ram)));
+    return bad == 0;
+}
+
 static int check_psram(void)
 {
     size_t size = esp_psram_get_size();
     size_t free_size = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    printf("PSRAM: installed=%u MiB free=%u MiB\n",
-            (unsigned)(size / MIB), (unsigned)(free_size / MIB));
+    printf("PSRAM: installed=%u MiB free=%u MiB clock=%d MHz\n",
+            (unsigned)(size / MIB), (unsigned)(free_size / MIB),
+            CONFIG_SPIRAM_SPEED);
 
-    uint32_t *ram = heap_caps_malloc(RAM_TEST_SIZE, MALLOC_CAP_SPIRAM);
+    size_t block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    block &= ~(MIB - 1);
+    uint32_t *ram = block ? heap_caps_malloc(block, MALLOC_CAP_SPIRAM) : NULL;
     int pass = size == EXPECTED_PSRAM && ram != NULL;
     if (ram != NULL)
     {
-        for (size_t i = 0; i < RAM_TEST_SIZE / sizeof(*ram); i++)
-            ram[i] = 0xa5a50000U ^ (uint32_t)i;
-        for (size_t i = 0; i < RAM_TEST_SIZE / sizeof(*ram); i++)
-        {
-            if (ram[i] != (0xa5a50000U ^ (uint32_t)i))
-            {
-                printf("PSRAM mismatch at byte %u\n", (unsigned)(i * sizeof(*ram)));
-                pass = 0;
-                break;
-            }
-        }
+        printf("PSRAM test: %u MiB write/verify\n", (unsigned)(block / MIB));
+        size_t words = block / sizeof(*ram);
+        pass &= psram_pattern(ram, words, 0xa5a5a5a5U);
+        pass &= psram_pattern(ram, words, 0x5a5a5a5aU);
         heap_caps_free(ram);
     }
-    printf("PSRAM test: 1 MiB write/read\n");
     report("PSRAM", pass);
     return pass;
 }
@@ -193,6 +229,7 @@ static int check_wifi_speed(void)
 }
 #endif
 
+#ifdef CONFIG_P4_NANO_BOARD_NANO_WIFI6
 static int check_wifi(void)
 {
     printf("Expected radio module: ESP32-C5-MINI-1U (check shield marking)\n");
@@ -328,16 +365,27 @@ static int check_wifi(void)
     return chip_pass;
 #endif
 }
+#endif
 
 void app_main(void)
 {
     int pass = 1;
-    printf("\n=== ESP32-P4-NANO-WIFI6-DB board check ===\n");
+    printf("\n=== %s board check ===\n", BOARD_NAME);
     pass &= check_chip();
     pass &= check_psram();
     pass &= check_flash();
+#ifdef CONFIG_P4_NANO_SD_TEST
+    /* Before ESP-Hosted, which uses SDMMC slot 1 on the Nano. */
+    pass &= sd_check();
+#else
+    printf("BOARD CHECK SD           SKIP\n");
+#endif
+#ifdef CONFIG_P4_NANO_BOARD_NANO_WIFI6
     pass &= check_wifi();
-#if defined(CONFIG_P4_NANO_WIFI_SCAN) && \
+#endif
+#ifdef CONFIG_P4_NANO_BOARD_WT9932P4X_TINY
+    printf("BOARD CHECK RESULT: %s\n", pass ? "PASS (NO RADIO)" : "FAIL");
+#elif defined(CONFIG_P4_NANO_WIFI_SCAN) && \
         defined(CONFIG_P4_NANO_WIFI_SPEED_TEST)
     printf("BOARD CHECK RESULT: %s\n", pass ? "PASS" : "FAIL");
 #elif defined(CONFIG_P4_NANO_WIFI_SCAN)

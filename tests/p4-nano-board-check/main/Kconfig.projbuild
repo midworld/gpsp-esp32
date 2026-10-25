@@ -3,6 +3,57 @@
 
 menu "P4 Nano board check"
 
+    choice P4_NANO_BOARD
+        prompt "Board"
+        default P4_NANO_BOARD_NANO_WIFI6
+
+        config P4_NANO_BOARD_NANO_WIFI6
+            bool "ESP32-P4-NANO-WIFI6-DB (ESP32-C5 over SDIO)"
+
+        config P4_NANO_BOARD_WT9932P4X_TINY
+            bool "WT9932P4X-TINY (no radio)"
+    endchoice
+
+    config P4_NANO_SD_TEST
+        bool "Run SD card speed test (FAT card with free space)"
+        default y
+
+    if P4_NANO_SD_TEST
+
+    config P4_NANO_SD_TEST_MIB
+        int "Test file size (MiB)"
+        range 1 1024
+        default 32
+
+    config P4_NANO_SD_LDO_CHAN
+        int "On-chip LDO channel for SD I/O power (-1 for none)"
+        range -1 4
+        default 4
+
+    choice P4_NANO_SD_UHS
+        prompt "UHS-I mode after DS and HS"
+        default P4_NANO_SD_UHS_SDR104
+        help
+            The card stays at 1.8 V after a UHS-I run. Remove power before
+            the next run.
+
+        config P4_NANO_SD_UHS_NONE
+            bool "None"
+
+        config P4_NANO_SD_UHS_SDR50
+            bool "SDR50 (100 MHz)"
+
+        config P4_NANO_SD_UHS_DDR50
+            bool "DDR50 (50 MHz)"
+
+        config P4_NANO_SD_UHS_SDR104
+            bool "SDR104 (200 MHz)"
+    endchoice
+
+    endif
+
+    if P4_NANO_BOARD_NANO_WIFI6
+
     config P4_NANO_WIFI_SCAN
         bool "Run active Wi-Fi scan (requires attached antenna)"
         default n
@@ -34,6 +85,8 @@ menu "P4 Nano board check"
         int "Seconds per direction"
         range 1 60
         default 10
+
+    endif
 
     endif
 
