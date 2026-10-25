@@ -14,6 +14,10 @@
 
 #if CONFIG_GPSP_AUDIO
 
+#if CONFIG_GPSP_AUDIO_HIGHPASS
+#include "audio_highpass.h"
+#endif
+
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <string.h>
@@ -296,6 +300,11 @@ static void audio_task(void *arg)
     int volume_db = -60;
     unsigned average = 0;
     uint32_t fraction = 0;
+#if CONFIG_GPSP_AUDIO_HIGHPASS
+    struct audio_highpass highpass;
+
+    audio_highpass_init(&highpass, AUDIO_RATE, 300);
+#endif
 
     (void)arg;
     /* Overflows before the first write come from codec setup, not play. */
@@ -335,6 +344,9 @@ static void audio_task(void *arg)
         }
         if (!playing)
         {
+#if CONFIG_GPSP_AUDIO_HIGHPASS
+            audio_highpass_reset(&highpass);
+#endif
             atomic_store(&s_smooth_level, level);
             audio_send(silence, AUDIO_BLOCK);
             continue;
@@ -386,6 +398,9 @@ static void audio_task(void *arg)
             fraction = position & 0xffff;
         }
         atomic_store(&s_tail, tail);
+#if CONFIG_GPSP_AUDIO_HIGHPASS
+        audio_highpass_process(&highpass, block, AUDIO_BLOCK);
+#endif
         audio_send(block, AUDIO_BLOCK);
         ready = true;
     }

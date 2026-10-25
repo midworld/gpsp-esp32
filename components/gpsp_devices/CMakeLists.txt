@@ -33,6 +33,9 @@ else()
     target_include_directories(${COMPONENT_LIB} SYSTEM PRIVATE "third_party/hid_report_parser")
     set_source_files_properties("third_party/hid_report_parser/hid_report_parser.cpp"
         PROPERTIES COMPILE_OPTIONS "-w")
+    if(CONFIG_GPSP_AUDIO_HIGHPASS)
+        target_sources(${COMPONENT_LIB} PRIVATE "audio_highpass.c")
+    endif()
     if(CONFIG_GPSP_USB_PAD_DIAGNOSTICS)
         # Trace root-port events without changing the USB driver.
         idf_component_get_property(gpsp_usb_dir ${gpsp_usb_component} COMPONENT_DIR)

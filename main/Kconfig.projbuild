@@ -475,14 +475,22 @@ menu "gpSP audio"
         default n
         help
             ES8311 DAC and board amplifier. The core makes sound at
-            32,768 Hz and the I2S clock runs at the same rate, so samples
-            only need a mono mix.
+            32,768 Hz and the I2S clock runs at the same rate. Stereo
+            samples are mixed to mono.
 
     config GPSP_AUDIO_VOLUME_DB
         int "DAC volume (dB)"
         depends on GPSP_AUDIO
         range -60 0
         default -6
+
+    config GPSP_AUDIO_HIGHPASS
+        bool "300 Hz speaker high-pass filter"
+        depends on GPSP_AUDIO
+        default n
+        help
+            Second-order Butterworth high-pass at 300 Hz.
+            Reduce low frequencies for small speakers.
 
     config GPSP_FRAMESKIP_AUTO
         bool "Skip drawing frames that fall behind"
