@@ -27,6 +27,7 @@ unsigned display_model_ppa_core(void);
 unsigned display_model_ppa_calls(void);
 unsigned display_model_blend_calls(void);
 void display_model_fail_menu_alloc(unsigned allocation);
+void display_model_fail_hud_runs(void);
 #if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
 void display_model_dma_fail_after(unsigned requests);
 void display_model_dma_check(void);
@@ -470,11 +471,16 @@ static void check_stats(uint16_t *input, uint16_t *ui)
     gpsp_dsi_hud_update(values);
 #if CONFIG_DSI_CHECK_MODEL
     unsigned calls = display_model_blend_calls();
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+    unsigned blends = 0;
+#else
+    unsigned blends = 1;
+#endif
 #endif
     ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
     memcpy(full, last_frame(), DSI_BYTES);
 #if CONFIG_DSI_CHECK_MODEL
-    assert(display_model_blend_calls() == calls + 2);
+    assert(display_model_blend_calls() == calls + 2 * blends);
 #endif
     gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_SIMPLE);
     /* Change geometry immediately, without waiting for another status update. */
@@ -502,7 +508,7 @@ static void check_stats(uint16_t *input, uint16_t *ui)
         }
     assert(fps && speed && background);
 #if CONFIG_DSI_CHECK_MODEL
-    assert(display_model_blend_calls() == calls + 3);
+    assert(display_model_blend_calls() == calls + 3 * blends);
 #endif
     gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_FULL);
     ESP_ERROR_CHECK(gpsp_dsi_draw(input, false));
@@ -537,6 +543,117 @@ static void check_stats(uint16_t *input, uint16_t *ui)
     heap_caps_free(full);
     puts("DSI_CHECK Stats: Off/Simple/Full pixels, bounds, immediate switch, UI pass");
 }
+
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+static void check_sram_hud(void)
+{
+    uint16_t *source = heap_caps_aligned_alloc(64, DSI_BYTES,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    uint16_t *reference = heap_caps_aligned_alloc(64, DSI_BYTES,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    uint16_t *candidate = heap_caps_aligned_alloc(64, DSI_BYTES,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    const struct lcd_status_value values[LCD_FIELD_COUNT] = {
+        [LCD_FIELD_FPS] = {"59.7", 0x07e0},
+        [LCD_FIELD_SPEED] = {"100%", 0xf800},
+    };
+
+    assert(source && reference && candidate && s_copy && s_tile);
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_FULL);
+    gpsp_dsi_hud_update(values);
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_OFF);
+#if !CONFIG_DSI_CHECK_MODEL
+    ppa_client_handle_t copy;
+    const ppa_client_config_t client = {.oper_type = PPA_OPERATION_SRM};
+
+    ESP_ERROR_CHECK(ppa_register_client(&client, &copy));
+#endif
+    unsigned checked = 0;
+
+    for (unsigned pattern = 0; pattern < 3; pattern++)
+        for (unsigned dma = 0; dma < 2; dma++)
+            for (unsigned mode = GPSP_DISPLAY_STATS_SIMPLE;
+                    mode <= GPSP_DISPLAY_STATS_FULL; mode++)
+            {
+#if CONFIG_DSI_CHECK_MODEL
+                if (dma)
+                    continue;
+#endif
+                for (unsigned i = 0; i < DSI_WIDTH * DSI_HEIGHT; i++)
+                    source[i] = reference[i] = candidate[i] =
+                            (uint16_t)(i * (pattern * 2 + 577) + pattern * 83);
+#if !CONFIG_DSI_CHECK_MODEL
+                if (dma)
+                {
+                    /* Old CPU cache lines must not replace newer DMA pixels. */
+                    memset(candidate, 0xa5, DSI_BYTES);
+                    ESP_ERROR_CHECK(esp_cache_msync(candidate, DSI_BYTES,
+                            ESP_CACHE_MSYNC_FLAG_DIR_C2M));
+                    const ppa_srm_oper_config_t op = {
+                        .in = {
+                            .buffer = source, .pic_w = 480, .pic_h = 800,
+                            .block_w = 480, .block_h = 800,
+                            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+                        },
+                        .out = {
+                            .buffer = candidate, .buffer_size = DSI_BYTES,
+                            .pic_w = 480, .pic_h = 800,
+                            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+                        },
+                        .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
+                        .scale_x = 1, .scale_y = 1,
+                        .mode = PPA_TRANS_MODE_BLOCKING,
+                    };
+                    ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(copy, &op));
+                }
+#endif
+                gpsp_dsi_hud_scratch(NULL, NULL, 0);
+                ESP_ERROR_CHECK(gpsp_dsi_hud_draw(reference, mode));
+                gpsp_dsi_hud_scratch(s_copy, s_tile, DSI_TILE_BYTES * 2);
+                ESP_ERROR_CHECK(gpsp_dsi_hud_draw(candidate, mode));
+                assert(!memcmp(reference, candidate, DSI_BYTES));
+                /* Isolate each unavailable resource with the others valid. */
+                for (unsigned fallback = 0; fallback < 3; fallback++)
+                {
+                    memcpy(candidate, source, DSI_BYTES);
+                    gpsp_dsi_hud_scratch(fallback == 2 ? NULL : s_copy,
+                            fallback == 0 ? NULL : s_tile,
+                            fallback == 1 ? 2 : DSI_TILE_BYTES * 2);
+                    ESP_ERROR_CHECK(gpsp_dsi_hud_draw(candidate, mode));
+                    assert(!memcmp(reference, candidate, DSI_BYTES));
+                }
+                checked++;
+            }
+#if !CONFIG_DSI_CHECK_MODEL
+    ESP_ERROR_CHECK(ppa_unregister_client(copy));
+#else
+    gpsp_dsi_hud_shutdown();
+    display_model_fail_hud_runs();
+    gpsp_dsi_hud_init();
+    gpsp_dsi_set_stats(GPSP_DISPLAY_STATS_FULL);
+    gpsp_dsi_hud_update(values);
+    memcpy(reference, source, DSI_BYTES);
+    memcpy(candidate, source, DSI_BYTES);
+    gpsp_dsi_hud_scratch(NULL, NULL, 0);
+    ESP_ERROR_CHECK(gpsp_dsi_hud_draw(reference, GPSP_DISPLAY_STATS_FULL));
+    gpsp_dsi_hud_scratch(s_copy, s_tile, DSI_TILE_BYTES * 2);
+    unsigned calls = display_model_blend_calls();
+
+    ESP_ERROR_CHECK(gpsp_dsi_hud_draw(candidate, GPSP_DISPLAY_STATS_FULL));
+    assert(display_model_blend_calls() == calls + 2);
+    assert(!memcmp(reference, candidate, DSI_BYTES));
+    gpsp_dsi_hud_shutdown();
+    gpsp_dsi_hud_init();
+    puts("DSI_CHECK SRAM Stats: allocation failure fallback/recovery pass");
+#endif
+    gpsp_dsi_hud_scratch(NULL, NULL, 0);
+    heap_caps_free(source);
+    heap_caps_free(reference);
+    heap_caps_free(candidate);
+    printf("DSI_CHECK SRAM Stats: %u exact frames, missing/small scratch fallback pass\n",
+            checked);
+}
+#endif
 
 static void check_color_lut(void)
 {
@@ -823,6 +940,9 @@ static void display_check(void *arg)
     }
     check_effects(input, ui);
     check_stats(input, ui);
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+    check_sram_hud();
+#endif
     check_pad_crops();
     check_virtual_pad(input, ui);
 #if CONFIG_DSI_CHECK_MODEL

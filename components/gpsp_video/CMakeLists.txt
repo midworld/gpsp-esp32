@@ -14,4 +14,7 @@ else()
         PRIV_REQUIRES gpsp_devices gpsp gpsp_font esp_driver_gpio
             esp_driver_spi esp_driver_ppa esp_driver_dma esp_lcd esp_mm esp_timer
     )
+    if(CONFIG_GPSP_LCD_DSI_SIMD AND CONFIG_GPSP_LCD_DSI_DMA_EXPAND)
+        target_sources(${COMPONENT_LIB} PRIVATE "dsi_hud_p4.S")
+    endif()
 endif()

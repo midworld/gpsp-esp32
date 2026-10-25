@@ -670,6 +670,9 @@ static esp_err_t dsi_draw(const uint16_t *pixels, bool ui,
 #endif
     if (stats != GPSP_DISPLAY_STATS_OFF)
     {
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+        gpsp_dsi_hud_scratch(s_copy, s_tile, DSI_TILE_BYTES * 2);
+#endif
         esp_err_t overlay = gpsp_dsi_hud_draw(s_frames[s_next], stats);
 
         if (overlay != ESP_OK)

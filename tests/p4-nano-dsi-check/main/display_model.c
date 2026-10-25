@@ -40,6 +40,12 @@ static unsigned ppa_calls;
 static unsigned blend_calls;
 static unsigned ppa_clients, fail_ppa_client;
 static unsigned fail_menu_alloc;
+static bool fail_hud_runs;
+
+void display_model_fail_hud_runs(void)
+{
+    fail_hud_runs = true;
+}
 
 void display_model_fail_ppa_client(unsigned registration)
 {
@@ -73,6 +79,11 @@ void *__wrap_heap_caps_aligned_alloc(size_t alignment, size_t size, uint32_t cap
 void *__real_heap_caps_malloc(size_t size, uint32_t caps);
 void *__wrap_heap_caps_malloc(size_t size, uint32_t caps)
 {
+    if (fail_hud_runs && size == 720 * 26 * 2 * 6)
+    {
+        fail_hud_runs = false;
+        return NULL;
+    }
     return menu_alloc_failed(size) ? NULL : __real_heap_caps_malloc(size, caps);
 }
 
@@ -448,10 +459,13 @@ esp_err_t __wrap_ppa_do_blend(ppa_client_handle_t handle,
                     (b >> 5 & 63) * 255 / 63 * (255 - alpha) + 127) / 255;
             unsigned blue = ((f & 255) * alpha +
                     (b & 31) * 255 / 31 * (255 - alpha) + 127) / 255;
-            output[(y + op->out.block_offset_y) * op->out.pic_w +
-                    x + op->out.block_offset_x] =
+            uint16_t pixel =
                     ((r * 31 + 127) / 255 << 11) |
                     ((g * 63 + 127) / 255 << 5) | ((blue * 31 + 127) / 255);
+            if (f == 0xc0000000u && op->fg_alpha_update_mode == PPA_ALPHA_NO_CHANGE)
+                pixel = (b >> 2) & 0x39e7;
+            output[(y + op->out.block_offset_y) * op->out.pic_w +
+                    x + op->out.block_offset_x] = pixel;
         }
     return esp_cache_msync(output, op->out.buffer_size,
             ESP_CACHE_MSYNC_FLAG_DIR_C2M);
@@ -479,6 +493,30 @@ struct model_copy
 };
 static struct model_copy *copy_model;
 static atomic_uint copy_peak, copy_reordered;
+
+esp_err_t __wrap_esp_color_convert_blocking(async_color_convert_handle_t handle,
+        const async_color_convert_request_t *request, int timeout)
+{
+    (void)timeout;
+    assert((void *)handle == copy_model);
+    /* Stats borrows both tiles only after the scaling queue is drained. */
+    for (unsigned i = 0; i < 3; i++)
+        assert(!atomic_load(&copy_model->jobs[i].owned));
+    assert(request->src_color_format == ESP_COLOR_FOURCC_RGB16 &&
+            request->dst_color_format == ESP_COLOR_FOURCC_RGB16);
+    assert(request->copy_width == 26 &&
+            (request->copy_height == 252 || request->copy_height == 720));
+    const uint16_t *source = request->src_buffer;
+    uint16_t *dest = request->dst_buffer;
+
+    assert(!panel_model || dest != panel_model->active);
+    for (unsigned y = 0; y < request->copy_height; y++)
+        memcpy(dest + (y + request->dst_y) * request->dst_stride + request->dst_x,
+                source + (y + request->src_y) * request->src_stride + request->src_x,
+                request->copy_width * sizeof(*dest));
+    return esp_cache_msync(dest, request->dst_stride * request->dst_height * 2,
+            ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+}
 
 void display_model_dma_fail_after(unsigned requests)
 {

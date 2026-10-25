@@ -1,4 +1,4 @@
-/* PPA statistics bars using the shared LCD values and layout.
+/* Statistics bars using the shared LCD values and layout.
  *
  * Copyright (C) 2026 Midworld Kim
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -43,6 +43,141 @@ struct hud_times
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t *s_tiles[2];
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+/* Opaque glyph spans; all other pixels use the fixed black background. */
+struct hud_run
+{
+    uint16_t offset, length, color;
+};
+#define HUD_RUNS (HUD_PIXELS / HUD_SCALE)
+static struct hud_run *s_runs[2];
+static unsigned s_run_count[2];
+static bool s_runs_ready[2];
+static async_color_convert_handle_t s_converter;
+static uint16_t *s_scratch;
+static size_t s_scratch_bytes;
+
+_Static_assert(HUD_SCALE == 2 && HUD_PIXELS <= UINT16_MAX,
+        "HUD spans require paired pixels and 16-bit offsets");
+
+#if CONFIG_GPSP_LCD_DSI_SIMD
+void gpsp_dsi_hud_quarter_p4(uint16_t *pixels, unsigned groups);
+#endif
+
+void gpsp_dsi_hud_scratch(async_color_convert_handle_t converter,
+        uint16_t *scratch, size_t bytes)
+{
+    s_converter = converter;
+    s_scratch = scratch;
+    s_scratch_bytes = bytes;
+}
+
+static void hud_runs_build(const uint32_t *tile)
+{
+    unsigned active = tile == s_tiles[1];
+    unsigned count = 0;
+
+    s_runs_ready[active] = false;
+    if (!s_runs[active])
+        return;
+    for (unsigned i = 0; i < HUD_PIXELS;)
+    {
+        uint32_t color = tile[i];
+
+        if (color >> 24 != 255)
+        {
+            i++;
+            continue;
+        }
+        unsigned first = i, row = i / HUD_HEIGHT;
+
+        do
+            i++;
+        while (i < HUD_PIXELS && i / HUD_HEIGHT == row && tile[i] == color);
+        if (count == HUD_RUNS || (first & 1) || ((i - first) & 1))
+            return;
+        s_runs[active][count++] = (struct hud_run) {
+            .offset = first, .length = i - first,
+            .color = ((color >> 8) & 0xf800) | ((color >> 5) & 0x07e0) |
+                    ((color >> 3) & 31),
+        };
+    }
+    s_run_count[active] = count;
+    s_runs_ready[active] = true;
+}
+
+static esp_err_t hud_sram_draw(uint16_t *frame, unsigned active,
+        unsigned width, unsigned bands)
+{
+    unsigned first = 0;
+#if CONFIG_GPSP_LCD_ROTATE_180
+    first = HUD_WIDTH - width;
+#endif
+    for (unsigned band = 0; band < bands; band++)
+    {
+#if CONFIG_GPSP_LCD_ROTATE_180
+        unsigned x = band ? 0 : 480 - HUD_HEIGHT;
+#else
+        unsigned x = band ? 480 - HUD_HEIGHT : 0;
+#endif
+        uint16_t *base = frame + (HUD_X + first) * 480;
+        const async_color_convert_request_t gather = {
+            .src_buffer = base, .src_stride = 480, .src_height = width,
+            .src_x = x,
+            .dst_buffer = s_scratch, .dst_stride = HUD_HEIGHT,
+            .dst_height = width,
+            .copy_width = HUD_HEIGHT, .copy_height = width,
+            .src_color_format = ESP_COLOR_FOURCC_RGB16,
+            .dst_color_format = ESP_COLOR_FOURCC_RGB16,
+        };
+        esp_err_t result = esp_color_convert_blocking(s_converter, &gather, -1);
+
+        if (result != ESP_OK)
+            return result;
+        unsigned pixels = width * HUD_HEIGHT;
+        unsigned scalar = 0;
+
+        /* Matches PPA black alpha 192 exactly in RGB565. */
+#if CONFIG_GPSP_LCD_DSI_SIMD
+        gpsp_dsi_hud_quarter_p4(s_scratch, pixels / 8);
+        scalar = pixels / 8 * 8;
+#endif
+        for (unsigned i = scalar; i < pixels; i++)
+            s_scratch[i] = (s_scratch[i] >> 2) & 0x39e7;
+        unsigned begin = band * HUD_BAR_PIXELS + first * HUD_HEIGHT;
+        unsigned end = begin + pixels;
+
+        for (unsigned i = 0; i < s_run_count[active]; i++)
+        {
+            const struct hud_run *run = &s_runs[active][i];
+
+            if (run->offset < begin)
+                continue;
+            if (run->offset >= end)
+                break;
+            uint32_t *dest = (uint32_t *)(s_scratch + run->offset - begin);
+            uint32_t color = run->color | ((uint32_t)run->color << 16);
+
+            for (unsigned j = 0; j < run->length / 2; j++)
+                dest[j] = color;
+        }
+        const async_color_convert_request_t scatter = {
+            .src_buffer = s_scratch, .src_stride = HUD_HEIGHT,
+            .src_height = width,
+            .dst_buffer = base, .dst_stride = 480, .dst_height = width,
+            .dst_x = x,
+            .copy_width = HUD_HEIGHT, .copy_height = width,
+            .src_color_format = ESP_COLOR_FOURCC_RGB16,
+            .dst_color_format = ESP_COLOR_FOURCC_RGB16,
+        };
+
+        result = esp_color_convert_blocking(s_converter, &scatter, -1);
+        if (result != ESP_OK)
+            return result;
+    }
+    return ESP_OK;
+}
+#endif
 static unsigned s_active;
 static int s_reader = -1;
 static atomic_uint s_mode;
@@ -155,6 +290,9 @@ static void hud_build(uint32_t *tile, const struct lcd_status_value *values)
     for (unsigned i = 0; i < LCD_FIELD_COUNT; i++)
         hud_text(tile, &lcd_status_positions[i], values[i].text,
                 values[i].color);
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+    hud_runs_build(tile);
+#endif
 }
 
 void gpsp_dsi_hud_init(void)
@@ -171,6 +309,15 @@ void gpsp_dsi_hud_init(void)
     s_tiles[1] = tiles + HUD_PIXELS;
     s_active = 0;
     s_reader = -1;
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+    gpsp_dsi_hud_scratch(NULL, NULL, 0);
+    s_runs[0] = heap_caps_malloc(HUD_RUNS * 2 * sizeof(*s_runs[0]),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_runs[1] = s_runs[0] ? s_runs[0] + HUD_RUNS : NULL;
+    memset(s_runs_ready, 0, sizeof(s_runs_ready));
+    if (!s_runs[0])
+        ESP_LOGW("gpsp_hud", "STAT spans unavailable; using PPA");
+#endif
 #if CONFIG_GPSP_LCD_DSI_DIAGNOSTICS
     memset(&s_times, 0, sizeof(s_times));
     s_build_count = s_build_max = 0;
@@ -243,6 +390,14 @@ esp_err_t gpsp_dsi_hud_draw(uint16_t *frame, enum gpsp_display_stats mode)
     unsigned bands = mode == GPSP_DISPLAY_STATS_FULL ? 2 : 1;
     unsigned width = mode == GPSP_DISPLAY_STATS_SIMPLE ? HUD_SIMPLE_WIDTH : HUD_WIDTH;
 
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+    if (s_converter && s_scratch && s_runs_ready[active] &&
+            s_scratch_bytes >= width * HUD_HEIGHT * sizeof(*s_scratch))
+    {
+        result = hud_sram_draw(frame, active, width, bands);
+        goto release;
+    }
+#endif
     for (unsigned band = 0; band < bands && result == ESP_OK; band++)
     {
         const uint32_t *tile = s_tiles[active] + band * HUD_BAR_PIXELS;
@@ -257,6 +412,9 @@ esp_err_t gpsp_dsi_hud_draw(uint16_t *frame, enum gpsp_display_stats mode)
 #endif
         result = gpsp_dsi_blend_overlay(frame, tile, HUD_HEIGHT, width, x, y);
     }
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+release:
+#endif
     portENTER_CRITICAL(&s_lock);
     s_reader = -1;
     portEXIT_CRITICAL(&s_lock);
@@ -285,6 +443,12 @@ void gpsp_dsi_hud_sample(enum gpsp_display_stats mode, unsigned ppa, unsigned ex
 void gpsp_dsi_hud_shutdown(void)
 {
     atomic_store(&s_mode, GPSP_DISPLAY_STATS_OFF);
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+    gpsp_dsi_hud_scratch(NULL, NULL, 0);
+    heap_caps_free(s_runs[0]);
+    s_runs[0] = s_runs[1] = NULL;
+    memset(s_runs_ready, 0, sizeof(s_runs_ready));
+#endif
     heap_caps_free(s_tiles[0]);
     s_tiles[0] = NULL;
     s_tiles[1] = NULL;

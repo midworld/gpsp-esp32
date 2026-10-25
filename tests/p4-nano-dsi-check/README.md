@@ -12,6 +12,8 @@
   save/reload with an in-memory config store.
 - Checks Stats Off/Simple/Full, legacy `on` settings, the FPS/speed-only
   top-right box, unchanged pixels outside it, immediate switching, and UI exclusion.
+- Compares SRAM Stats with PPA output for CPU/DMA backgrounds and both layouts.
+  Checks missing/small scratch, missing converter, and span allocation failure fallback.
 - Checks virtual pad game/UI bounds, pressed states, border cleanup after Off,
   static-menu refresh, and setting persistence. Touch contacts are synthetic;
   physical touch needs a separate check. Pad timing excludes initial cache creation

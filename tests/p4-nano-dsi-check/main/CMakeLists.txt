@@ -22,6 +22,11 @@ idf_component_register(
         esp_driver_ppa esp_driver_dma esp_lcd esp_mm esp_timer esp_psram gpsp_font gpsp_display
 )
 
+if(CONFIG_GPSP_LCD_DSI_SIMD AND CONFIG_GPSP_LCD_DSI_DMA_EXPAND)
+    target_sources(${COMPONENT_LIB} PRIVATE
+        "../../../components/gpsp_video/dsi_hud_p4.S")
+endif()
+
 if(CONFIG_DSI_CHECK_MODEL)
     target_sources(${COMPONENT_LIB} PRIVATE "display_model.c")
     foreach(symbol IN ITEMS
@@ -39,7 +44,8 @@ if(CONFIG_DSI_CHECK_MODEL)
     endforeach()
     if(CONFIG_GPSP_LCD_DSI_DMA_EXPAND)
         foreach(symbol IN ITEMS esp_async_color_convert_install_dma2d
-                esp_async_color_convert_uninstall esp_async_color_convert)
+                esp_async_color_convert_uninstall esp_async_color_convert
+                esp_color_convert_blocking)
             target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=${symbol}")
         endforeach()
     endif()
