@@ -21,7 +21,7 @@
 
 #define OUTPUT_I2C_ADDRESS 0x18
 #define OUTPUT_DMA_COUNT 4
-#define OUTPUT_DMA_FRAMES (AUDIO_TEST_RATE / 200)
+#define OUTPUT_DMA_FRAMES AUDIO_TEST_DMA_FRAMES
 #define OUTPUT_CLOCKS ((1u << 5) | (1u << 4) | (1u << 2) | (1u << 0))
 #define OUTPUT_MUTE ((1u << 6) | (1u << 5))
 #define OUTPUT_POWER ((1u << 5) | (1u << 4) | (1u << 2))

@@ -30,11 +30,11 @@
 #define AUDIO_PIN_AMPLIFIER gpsp_hardware.audio.amplifier
 #define AUDIO_RATE GPSP_AUDIO_RATE
 
-/* I2S DMA: 4 x about 5 ms. The writer moves blocks of about 10 ms
-   (327 samples: 32,768 Hz has no whole-millisecond block). */
+/* I2S DMA: 4 x about 5 ms. Align 16-bit stereo buffers to 64 bytes,
+   and fill two whole DMA buffers per write. */
 #define AUDIO_DMA_COUNT 4
-#define AUDIO_DMA_FRAMES (AUDIO_RATE / 200)
-#define AUDIO_BLOCK (AUDIO_RATE / 100)
+#define AUDIO_DMA_FRAMES (((AUDIO_RATE / 200 + 15) / 16) * 16)
+#define AUDIO_BLOCK (AUDIO_DMA_FRAMES * 2)
 
 /* Mono queue (power of two). Play starts at the target. The frontend
    keeps the level near it by pacing frames (see audio_balance), and the

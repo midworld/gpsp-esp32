@@ -13,7 +13,9 @@
 #ifndef AUDIO_TEST_RATE
 #define AUDIO_TEST_RATE 48000u
 #endif
-#define AUDIO_TEST_BLOCK_FRAMES (AUDIO_TEST_RATE / 100u)
+/* Match whole 64-byte-aligned DMA buffers in 16-bit stereo format. */
+#define AUDIO_TEST_DMA_FRAMES (((AUDIO_TEST_RATE / 200u + 15u) / 16u) * 16u)
+#define AUDIO_TEST_BLOCK_FRAMES (AUDIO_TEST_DMA_FRAMES * 2u)
 #define AUDIO_TEST_RESAMPLE_MAX 2u
 #define AUDIO_TEST_GBA_CYCLES 280896u
 #define AUDIO_TEST_GBA_CLOCK 16777216u
