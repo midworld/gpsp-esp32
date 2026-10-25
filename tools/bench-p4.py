@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Midworld Kim
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Capture and check a fixed-frame benchmark from a physical P4 board."""
+"""Capture and check a fixed-frame benchmark from a physical P4 or S31 board."""
 
 import argparse
 import csv
@@ -42,9 +42,10 @@ def read_config(path, parser_module):
         if values.get(name) != "1":
             raise ValueError(f"{path}: expected {name}=1")
     if values.get("CONFIG_ESPEMU") == "1":
-        raise ValueError(f"{path}: expected a physical P4 build")
-    if values.get("CONFIG_IDF_TARGET_ESP32P4") != "1":
-        raise ValueError(f"{path}: expected ESP32-P4 target")
+        raise ValueError(f"{path}: expected a physical board build")
+    if not any(values.get("CONFIG_IDF_TARGET_" + target) == "1"
+               for target in ("ESP32P4", "ESP32S31")):
+        raise ValueError(f"{path}: expected ESP32-P4 or ESP32-S31 target")
     frames = int(values["CONFIG_GPSP_BENCHMARK_FRAMES"])
     if not 64 <= frames <= 5120:
         raise ValueError(f"{path}: frame count outside 64..5120")
@@ -156,6 +157,8 @@ def conditions(options):
 
 def compare(current, previous_path):
     previous = json.loads((previous_path / "result.json").read_text())
+    if current.get("target", "esp32p4") != previous.get("target", "esp32p4"):
+        raise ValueError("comparison chip targets differ")
     if not current["rom_sha256"] or not previous["rom_sha256"]:
         raise ValueError("comparison needs ROM hashes; pass --rom for each run")
     if current["rom_sha256"] != previous["rom_sha256"]:
@@ -241,6 +244,8 @@ def main():
         result = {
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "build_dir": str(build),
+            "target": "esp32s31" if options.get("CONFIG_IDF_TARGET_ESP32S31")
+                      == "1" else "esp32p4",
             "frames": frames,
             **loaded_rom,
             "firmware_sha256": sha256(firmware),

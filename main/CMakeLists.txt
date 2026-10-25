@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 if(NOT "$ENV{GPSP_BUILD_ESPEMU}" STREQUAL "1" AND
-        NOT IDF_TARGET STREQUAL "esp32p4")
+        NOT IDF_TARGET STREQUAL "esp32p4" AND
+        NOT "$ENV{GPSP_BUILD_BOARD}" STREQUAL "esp32s31")
     message(FATAL_ERROR
-        "Physical gpSP backend supports esp32p4 only; set CONFIG_ESPEMU=y for ESP-EMU")
+        "Select a physical board matching the IDF target, or use ESP-EMU")
 endif()
 
 idf_component_register(

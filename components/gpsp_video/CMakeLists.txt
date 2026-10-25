@@ -1,7 +1,8 @@
 # Copyright (C) 2026 Midworld Kim
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-if("$ENV{GPSP_BUILD_ESPEMU}" STREQUAL "1")
+if("$ENV{GPSP_BUILD_ESPEMU}" STREQUAL "1" OR
+        "$ENV{GPSP_BUILD_BOARD}" STREQUAL "esp32s31")
     idf_component_register()
 else()
     idf_component_register(

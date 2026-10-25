@@ -24,6 +24,29 @@ def startup(path, size=6):
             f"Execution started: configured_mode=rv32-jit ROM={path}\n")
 
 
+class ConfigTests(unittest.TestCase):
+    def test_physical_targets(self):
+        parser = BENCH.load_parser()
+        for target, emulated, accepted in (("ESP32P4", False, True),
+                                           ("ESP32S31", False, True),
+                                           ("ESP32S31", True, False),
+                                           ("ESP32S3", False, False)):
+            with self.subTest(target=target, emulated=emulated):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "sdkconfig.h"
+                    path.write_text(
+                        "#define CONFIG_GPSP_BENCHMARK 1\n"
+                        "#define CONFIG_GPSP_BENCHMARK_STOP_AFTER_REPORT 1\n"
+                        "#define CONFIG_GPSP_BENCHMARK_FRAMES 64\n"
+                        f"#define CONFIG_IDF_TARGET_{target} 1\n" +
+                        ("#define CONFIG_ESPEMU 1\n" if emulated else ""))
+                    if accepted:
+                        self.assertEqual(BENCH.read_config(path, parser)[1], 64)
+                    else:
+                        with self.assertRaises(ValueError):
+                            BENCH.read_config(path, parser)
+
+
 class RomTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -149,6 +172,13 @@ class CompareTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, condition):
                     self.run_compare(BENCH.conditions(base),
                                      BENCH.conditions({**base, key: value}))
+
+    def test_comparison_requires_same_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "result.json").write_text('{"target": "esp32p4"}')
+            with self.assertRaisesRegex(ValueError, "chip targets differ"):
+                BENCH.compare({"target": "esp32s31"}, path)
 
     def run_compare(self, previous_conditions, current_conditions,
                     previous_source=None, current_source=None):

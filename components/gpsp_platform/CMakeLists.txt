@@ -3,20 +3,17 @@
 
 if("$ENV{GPSP_BUILD_ESPEMU}" STREQUAL "1")
     set(gpsp_network_requirements esp_eth esp_event esp_netif)
+    set(gpsp_board_source "$ENV{GPSP_BOARD_DIR}/board.c" "transport.c")
+elseif("$ENV{GPSP_BUILD_BOARD}" STREQUAL "esp32s31")
+    set(gpsp_board_source "headless.c")
 else()
     set(gpsp_network_requirements gpsp_devices gpsp_video)
-endif()
-
-if("$ENV{GPSP_BUILD_ESPEMU}" STREQUAL "1")
-    set(gpsp_board_source "$ENV{GPSP_BOARD_DIR}/board.c")
-else()
-    set(gpsp_board_source "esp32p4/cache.c")
+    set(gpsp_board_source "esp32p4/cache.c" "transport.c")
 endif()
 
 idf_component_register(
     SRCS ${gpsp_board_source}
         "gpsp_board.c"
-        "transport.c"
         "gpsp_profile.c"
         "gpsp_rv32_platform.c"
         "gpsp_serial_input.c"
