@@ -60,6 +60,8 @@ ROWS_PER_WINDOW = {
     "BENCH_JIT_MISS_REASON": 3,
     "BENCH_JIT_MISS_ENTRY": 3,
 }
+SUMMARY_RECORDS = ("BENCH_JIT_SHORT_BRANCH", "BENCH_JIT_SMC",
+                   "BENCH_JIT_RAM_UNITS")
 
 
 def sha256(path):
@@ -338,6 +340,11 @@ def parse_log(text, frame_count, options, full_video=False):
                 any(set(row) != fields for row in rows[1:])):
             raise ValueError(f"{name}: inconsistent record fields")
     for name, rows in records.items():
+        if name in SUMMARY_RECORDS:
+            if (len(rows) != 1 or "version" not in rows[0] or
+                    {"first", "last"} & set(rows[0])):
+                raise ValueError(f"{name}: invalid summary record")
+            continue
         if name == "BENCH_IMAGE":
             expected = [(first, last, row) for first, last in windows
                         for row in range(20)]

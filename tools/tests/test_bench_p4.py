@@ -137,6 +137,19 @@ class RomTests(unittest.TestCase):
 
 
 class CompareTests(unittest.TestCase):
+    def test_memory_clock_and_peripherals_must_match(self):
+        base = {"CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ": "400",
+                "CONFIG_SPIRAM_SPEED": "200"}
+        for key, value, condition in (
+                ("CONFIG_SPIRAM_SPEED", "250", "psram_mhz"),
+                ("CONFIG_GPSP_LCD", "1", "lcd"),
+                ("CONFIG_GPSP_AUDIO", "1", "audio"),
+                ("CONFIG_GPSP_USB_PAD", "1", "usb_pad")):
+            with self.subTest(condition=condition):
+                with self.assertRaisesRegex(ValueError, condition):
+                    self.run_compare(BENCH.conditions(base),
+                                     BENCH.conditions({**base, key: value}))
+
     def run_compare(self, previous_conditions, current_conditions,
                     previous_source=None, current_source=None):
         result = {"rom_sha256": "rom", "frames": 64, "checksums": [],

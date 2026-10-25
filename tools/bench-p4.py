@@ -134,15 +134,20 @@ def conditions(options):
               "PHASE_WORK", "VIDEO_DETAIL", "INSTRET")
     result = {
         "cpu_mhz": int(options["CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ"]),
+        "psram_mhz": int(options["CONFIG_SPIRAM_SPEED"], 0)
+                     if "CONFIG_SPIRAM_SPEED" in options else None,
         "perf_optimization": options.get("CONFIG_COMPILER_OPTIMIZATION_PERF") == "1",
         "unthrottled": options.get("CONFIG_GPSP_ESPEMU_UNTHROTTLED") == "1",
         "fresh_save": options.get("CONFIG_GPSP_BENCHMARK_FRESH_SAVE") == "1",
         "held_buttons": int(options.get("CONFIG_GPSP_BENCHMARK_HOLD_BUTTONS", "0x0"), 0),
         "status": options.get("CONFIG_GPSP_STATUS") == "1",
+        "lcd": options.get("CONFIG_GPSP_LCD") == "1",
+        "audio": options.get("CONFIG_GPSP_AUDIO") == "1",
+        "usb_pad": options.get("CONFIG_GPSP_USB_PAD") == "1",
         "receiver_enabled": host != '""',
         "receiver_host_sha256": hashlib.sha256(host.encode()).hexdigest(),
         "receiver_port": options.get("CONFIG_GPSP_SERVER_PORT"),
-        "wifi_configured": options.get("CONFIG_GPSP_WIFI_SSID") != '""',
+        "wifi_configured": options.get("CONFIG_GPSP_WIFI_SSID", '""') != '""',
     }
     result.update({probe.lower(): options.get("CONFIG_GPSP_BENCHMARK_" + probe) == "1"
                    for probe in probes})

@@ -106,6 +106,18 @@ class ParseLogTest(unittest.TestCase):
         records, _ = BENCH.parse_log(log_for(70), 70, {})
         self.assertEqual(records["BENCH_SLICE"][1]["frames"], "6")
 
+    def test_shutdown_summaries_are_not_window_records(self):
+        for name in BENCH.SUMMARY_RECORDS:
+            with self.subTest(name=name):
+                summary = f"{name} version=1 attempts=4"
+                records, _ = BENCH.parse_log(log_for(128) + "\n" + summary,
+                                              128, {})
+                self.assertEqual(len(records[name]), 1)
+                for invalid in (summary + "\n" + summary,
+                                summary + " first=1 last=128"):
+                    with self.assertRaisesRegex(ValueError, "invalid summary"):
+                        BENCH.parse_log(log_for(128) + "\n" + invalid, 128, {})
+
     def test_configured_count_is_required(self):
         with self.assertRaisesRegex(ValueError, "BENCH_DONE"):
             BENCH.parse_log(log_for(192), 5120, {})
