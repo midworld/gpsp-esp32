@@ -38,7 +38,19 @@ static unsigned last_source_pixels;
 static unsigned last_core;
 static unsigned ppa_calls;
 static unsigned blend_calls;
+static unsigned ppa_clients, fail_ppa_client;
 static unsigned fail_menu_alloc;
+
+void display_model_fail_ppa_client(unsigned registration)
+{
+    assert(!ppa_clients);
+    fail_ppa_client = registration;
+}
+
+void display_model_ppa_idle(void)
+{
+    assert(!ppa_clients && !fail_ppa_client);
+}
 
 void display_model_fail_menu_alloc(unsigned allocation)
 {
@@ -319,6 +331,9 @@ static void ppa_tick(void *arg)
 esp_err_t __wrap_ppa_register_client(const ppa_client_config_t *config,
         ppa_client_handle_t *handle)
 {
+    assert(xPortGetCoreID() == 1);
+    if (fail_ppa_client && !--fail_ppa_client)
+        return ESP_ERR_NO_MEM;
     assert(config->oper_type == PPA_OPERATION_SRM ||
             config->oper_type == PPA_OPERATION_BLEND);
     struct model_client *client = calloc(1, sizeof(*client));
@@ -328,6 +343,7 @@ esp_err_t __wrap_ppa_register_client(const ppa_client_config_t *config,
         .dispatch_method = ESP_TIMER_ISR, .name = "ppa_model",
     };
     ESP_ERROR_CHECK(esp_timer_create(&timer, &client->timer));
+    ppa_clients++;
     *handle = (void *)client;
     return ESP_OK;
 }
@@ -337,6 +353,8 @@ esp_err_t __wrap_ppa_unregister_client(ppa_client_handle_t handle)
     struct model_client *client = (void *)handle;
     ESP_ERROR_CHECK(esp_timer_delete(client->timer));
     free(client);
+    assert(ppa_clients);
+    ppa_clients--;
     return ESP_OK;
 }
 

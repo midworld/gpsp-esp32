@@ -709,6 +709,65 @@ esp_err_t gpsp_dsi_clear(void)
 #define DSI_TRY(call) do { result = (call); \
     if (result != ESP_OK) goto fail; } while (0)
 
+struct dsi_accelerators
+{
+    SemaphoreHandle_t done;
+    esp_err_t result;
+};
+
+static esp_err_t dsi_accelerators_init(void)
+{
+    const ppa_client_config_t ppa = {
+        .oper_type = PPA_OPERATION_SRM,
+        .max_pending_trans_num = 1,
+    };
+    const ppa_client_config_t overlay = {
+        .oper_type = PPA_OPERATION_BLEND,
+        .max_pending_trans_num = 1,
+    };
+    esp_err_t result;
+
+    DSI_TRY(ppa_register_client(&ppa, &s_game_ppa));
+    DSI_TRY(ppa_register_client(&ppa, &s_ui_ppa));
+    DSI_TRY(ppa_register_client(&overlay, &s_overlay_ppa));
+#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
+    dsi_copy_init();
+#endif
+    ESP_LOGI(TAG, "PPA/DMA2D init_core=%d", xPortGetCoreID());
+    return ESP_OK;
+
+fail:
+    return result;
+}
+
+static void dsi_accelerators_task(void *arg)
+{
+    struct dsi_accelerators *init = arg;
+
+    init->result = dsi_accelerators_init();
+    xSemaphoreGive(init->done);
+    vTaskDelete(NULL);
+}
+
+static esp_err_t dsi_accelerators_start(void)
+{
+    /* DMA2D allocates its completion interrupts on the initializing core. */
+    if (xPortGetCoreID() == 1)
+        return dsi_accelerators_init();
+    struct dsi_accelerators init = {
+        .done = xSemaphoreCreateBinary(),
+        .result = ESP_ERR_NO_MEM,
+    };
+
+    if (!init.done)
+        return ESP_ERR_NO_MEM;
+    if (xTaskCreatePinnedToCore(dsi_accelerators_task, "dsi_init", 4096,
+            &init, 4, NULL, 1) == pdPASS)
+        xSemaphoreTake(init.done, portMAX_DELAY);
+    vSemaphoreDelete(init.done);
+    return init.result;
+}
+
 esp_err_t gpsp_dsi_init(void)
 {
     const esp_ldo_channel_config_t power = {
@@ -735,14 +794,6 @@ esp_err_t gpsp_dsi_init(void)
         .out_color_format = LCD_COLOR_FMT_RGB565,
         .num_fbs = DSI_BUFFERS,
         .video_timing = gpsp_dsi_panel.timing,
-    };
-    const ppa_client_config_t ppa = {
-        .oper_type = PPA_OPERATION_SRM,
-        .max_pending_trans_num = 1,
-    };
-    const ppa_client_config_t overlay = {
-        .oper_type = PPA_OPERATION_BLEND,
-        .max_pending_trans_num = 1,
     };
     const esp_lcd_dpi_panel_event_callbacks_t callbacks = {
         .on_frame_buf_complete = dsi_frame_done,
@@ -780,12 +831,7 @@ esp_err_t gpsp_dsi_init(void)
             &s_frames[0], &s_frames[1], &s_frames[2]));
     DSI_TRY(esp_lcd_dpi_panel_register_event_callbacks(s_panel,
             &callbacks, NULL));
-    DSI_TRY(ppa_register_client(&ppa, &s_game_ppa));
-    DSI_TRY(ppa_register_client(&ppa, &s_ui_ppa));
-    DSI_TRY(ppa_register_client(&overlay, &s_overlay_ppa));
-#if CONFIG_GPSP_LCD_DSI_DMA_EXPAND
-    dsi_copy_init();
-#endif
+    DSI_TRY(dsi_accelerators_start());
     DSI_TRY(esp_lcd_panel_init(s_panel));
     memset(s_widths, 0, sizeof(s_widths));
     memset(s_pad_borders, 0, sizeof(s_pad_borders));

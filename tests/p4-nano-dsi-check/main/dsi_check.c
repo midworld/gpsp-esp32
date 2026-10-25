@@ -19,6 +19,8 @@
 
 #if CONFIG_DSI_CHECK_MODEL
 void display_model_fail_init(void);
+void display_model_fail_ppa_client(unsigned registration);
+void display_model_ppa_idle(void);
 unsigned display_model_ppa_scale(void);
 unsigned display_model_ppa_source_pixels(void);
 unsigned display_model_ppa_core(void);
@@ -859,6 +861,22 @@ static void display_check(void *arg)
 
 void app_main(void)
 {
+    assert(xPortGetCoreID() == 0);
+#if CONFIG_DSI_CHECK_MODEL
+    for (unsigned stage = 1; stage <= 3; stage++)
+    {
+        display_model_fail_ppa_client(stage);
+        assert(gpsp_lcd_init() == ESP_ERR_NO_MEM);
+        assert(!s_panel && !s_game_ppa && !s_ui_ppa && !s_overlay_ppa);
+        display_model_ppa_idle();
+    }
+#endif
+    ESP_ERROR_CHECK(gpsp_lcd_init());
+    gpsp_lcd_shutdown();
+#if CONFIG_DSI_CHECK_MODEL
+    display_model_ppa_idle();
+#endif
+    puts("DSI_CHECK CPU0 initialization and shutdown pass");
     assert(xTaskCreatePinnedToCore(display_check, "dsi_check", 8192, NULL,
             4, NULL, 1) == pdPASS);
 }

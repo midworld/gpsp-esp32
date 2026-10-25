@@ -4,6 +4,8 @@
 - Checks game 3x, UI 2x, landscape rotation, black borders, partial UI
   updates, frame hand-off, shared I2C ownership, and shutdown/restart.
 - Model mode also checks recovery after a panel initialization failure.
+- Checks CPU0 startup/shutdown with PPA clients initialized on CPU1.
+  Model mode injects failure at each PPA registration and checks cleanup.
 - Checks render-buffer recovery across game switches and held menu frames.
 - Checks exact nearest pixels, grid placement, color-profile samples,
   unchanged UI colors, menu visibility, left/right cycling, and settings
