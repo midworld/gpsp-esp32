@@ -378,15 +378,16 @@ menu "gpSP menu"
 endmenu
 
 menu "gpSP serial input"
-    depends on IDF_TARGET_ESP32P4 && !ESPEMU && ESP_CONSOLE_UART && !GPSP_BENCHMARK
+    depends on IDF_TARGET_ESP32P4 && !ESPEMU && !GPSP_BENCHMARK && \
+        (ESP_CONSOLE_UART || ESP_CONSOLE_USB_SERIAL_JTAG)
 
     config GPSP_SERIAL_INPUT
-        bool "Read buttons from the console UART"
+        bool "Read buttons from the console"
         default y
         help
-            Accept the host viewer's input messages on the console UART
-            (espemu-host --serial). Buttons release after 0.5 seconds
-            without a message.
+            Accept the host viewer's input messages on the console UART or
+            USB Serial/JTAG (espemu-host --serial). Buttons release after
+            0.5 seconds without a message.
 
 endmenu
 

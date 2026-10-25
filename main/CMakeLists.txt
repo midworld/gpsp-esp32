@@ -36,6 +36,7 @@ idf_component_register(
         gpsp_platform
         gpsp_devices
         esp_driver_uart
+        esp_driver_usb_serial_jtag
         esp_http_server
         esp_timer
         fatfs

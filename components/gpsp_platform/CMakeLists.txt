@@ -33,6 +33,7 @@ idf_component_register(
     PRIV_REQUIRES
         esp_driver_tsens
         esp_driver_uart
+        esp_driver_usb_serial_jtag
         esp_mm
         esp_psram
         esp_timer

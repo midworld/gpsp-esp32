@@ -1,4 +1,5 @@
-/* Button input from the host viewer over the console UART.
+/* Button input from the host viewer over the console UART or
+ * USB Serial/JTAG.
  *
  * Copyright (C) 2026 Midworld Kim
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -13,7 +14,12 @@
 #include <stdatomic.h>
 #include <string.h>
 
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#else
 #include "driver/uart.h"
+#endif
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -99,9 +105,57 @@ static bool gpsp_serial_apply(const uint8_t *message)
     return true;
 }
 
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#define GPSP_SERIAL_PORT_NAME "USB Serial/JTAG"
+
+/* Buffered output uses the SDK's bounded wait when the host stops reading. */
+static bool gpsp_serial_open(void)
+{
+    usb_serial_jtag_driver_config_t config =
+            USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+
+    config.rx_buffer_size = 512;
+    config.tx_buffer_size = 4096;
+    if (usb_serial_jtag_driver_install(&config) != ESP_OK)
+        return false;
+    usb_serial_jtag_vfs_use_driver();
+    return true;
+}
+
+static void gpsp_serial_close(void)
+{
+    usb_serial_jtag_vfs_use_nonblocking();
+    usb_serial_jtag_driver_uninstall();
+}
+
+static int gpsp_serial_read(uint8_t *data, size_t size, TickType_t wait)
+{
+    return usb_serial_jtag_read_bytes(data, size, wait);
+}
+#else
+#define GPSP_SERIAL_STR2(x) #x
+#define GPSP_SERIAL_STR(x) GPSP_SERIAL_STR2(x)
+#define GPSP_SERIAL_PORT_NAME "UART" GPSP_SERIAL_STR(CONFIG_ESP_CONSOLE_UART_NUM)
+
+static bool gpsp_serial_open(void)
+{
+    return uart_driver_install(CONFIG_ESP_CONSOLE_UART_NUM, 512, 0, 0, NULL,
+            0) == ESP_OK;
+}
+
+static void gpsp_serial_close(void)
+{
+    uart_driver_delete(CONFIG_ESP_CONSOLE_UART_NUM);
+}
+
+static int gpsp_serial_read(uint8_t *data, size_t size, TickType_t wait)
+{
+    return uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, data, size, wait);
+}
+#endif
+
 static void gpsp_serial_task(void *arg)
 {
-    const uart_port_t port = CONFIG_ESP_CONSOLE_UART_NUM;
     uint8_t message[GPSP_SERIAL_MESSAGE_SIZE];
     size_t length = 0;
     int64_t last_input_us = 0;
@@ -110,7 +164,7 @@ static void gpsp_serial_task(void *arg)
 
     while (atomic_load_explicit(&s_running, memory_order_relaxed))
     {
-        int count = uart_read_bytes(port, message + length,
+        int count = gpsp_serial_read(message + length,
                 GPSP_SERIAL_MESSAGE_SIZE - length, pdMS_TO_TICKS(50));
 
         if (count > 0)
@@ -143,34 +197,35 @@ static void gpsp_serial_task(void *arg)
         }
     }
 
-    uart_driver_delete(port);
+    gpsp_serial_close();
     s_task = NULL;
     vTaskDelete(NULL);
 }
 
 void gpsp_serial_input_start(void)
 {
-    const uart_port_t port = CONFIG_ESP_CONSOLE_UART_NUM;
-
     if (s_task)
         return;
-    if (uart_driver_install(port, 512, 0, 0, NULL, 0) != ESP_OK)
+    if (!gpsp_serial_open())
     {
-        ESP_LOGW(TAG, "Console UART driver unavailable; serial input off");
+        ESP_LOGW(TAG, "Console driver unavailable; serial input off");
         return;
     }
 
     gpsp_command_queue_init(&s_commands);
+    atomic_store(&s_input_bits, 0);
+    atomic_store(&s_home_until_us, 0);
     atomic_store(&s_quit_pending, false);
     atomic_store(&s_running, true);
     if (xTaskCreatePinnedToCore(gpsp_serial_task, "gpsp_serial", 3072, NULL,
             tskIDLE_PRIORITY + 4, &s_task, GPSP_SERIAL_TASK_CORE) != pdPASS)
     {
-        uart_driver_delete(port);
+        atomic_store(&s_running, false);
+        gpsp_serial_close();
         ESP_LOGW(TAG, "Serial input task failed");
         return;
     }
-    ESP_LOGI(TAG, "Serial input ready on UART%d", (int)port);
+    ESP_LOGI(TAG, "Serial input ready on " GPSP_SERIAL_PORT_NAME);
 }
 
 uint32_t gpsp_serial_input_read(void)
@@ -217,6 +272,8 @@ void gpsp_serial_input_stop(void)
     atomic_store(&s_running, false);
     while (s_task)
         vTaskDelay(1);
+    atomic_store(&s_input_bits, 0);
+    atomic_store(&s_home_until_us, 0);
 }
 
 #endif

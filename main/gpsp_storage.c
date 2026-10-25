@@ -23,7 +23,12 @@
 #include "wear_levelling.h"
 
 #if CONFIG_GPSP_SD_CARD
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#else
 #include "driver/uart.h"
+#endif
 #include "esp_timer.h"
 #if CONFIG_ESPEMU
 #include "diskio_wl.h"
@@ -133,18 +138,61 @@ static char *gpsp_trim(char *text)
     return text;
 }
 
-/* Reads one line from the console UART, or returns false on timeout. */
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+static bool gpsp_console_open(void)
+{
+    usb_serial_jtag_driver_config_t config =
+            USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+
+    config.rx_buffer_size = 256;
+    if (usb_serial_jtag_driver_install(&config) != ESP_OK)
+        return false;
+    usb_serial_jtag_vfs_use_driver();
+    return true;
+}
+
+static int gpsp_console_read(uint8_t *byte, TickType_t wait)
+{
+    return usb_serial_jtag_read_bytes(byte, 1, wait);
+}
+
+static void gpsp_console_close(void)
+{
+    usb_serial_jtag_vfs_use_nonblocking();
+    usb_serial_jtag_driver_uninstall();
+}
+#elif CONFIG_ESP_CONSOLE_UART
+static bool gpsp_console_open(void)
+{
+    if (uart_driver_install(CONFIG_ESP_CONSOLE_UART_NUM, 256, 0, 0, NULL,
+            0) != ESP_OK)
+        return false;
+    uart_flush_input(CONFIG_ESP_CONSOLE_UART_NUM);
+    return true;
+}
+
+static int gpsp_console_read(uint8_t *byte, TickType_t wait)
+{
+    return uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, byte, 1, wait);
+}
+
+static void gpsp_console_close(void)
+{
+    uart_driver_delete(CONFIG_ESP_CONSOLE_UART_NUM);
+}
+#endif
+
+/* Reads one line from the console, or returns false on timeout. */
 static bool gpsp_console_read_line(char *line, size_t size, uint32_t wait_ms)
 {
-#if CONFIG_ESP_CONSOLE_UART
-    const uart_port_t port = CONFIG_ESP_CONSOLE_UART_NUM;
+#if CONFIG_ESP_CONSOLE_UART || CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
     int64_t deadline = esp_timer_get_time() + (int64_t)wait_ms * 1000;
     size_t length = 0;
     bool done = false;
+    bool overflow = false;
 
-    if (uart_driver_install(port, 256, 0, 0, NULL, 0) != ESP_OK)
+    if (!size || !gpsp_console_open())
         return false;
-    uart_flush_input(port);
 
     ESP_LOGI(TAG, "ROM name? (%lu ms)", (unsigned long)wait_ms);
     while (!done)
@@ -153,7 +201,7 @@ static bool gpsp_console_read_line(char *line, size_t size, uint32_t wait_ms)
         uint8_t byte;
 
         if (left <= 0 ||
-            uart_read_bytes(port, &byte, 1, pdMS_TO_TICKS(left / 1000 + 1)) <= 0)
+            gpsp_console_read(&byte, pdMS_TO_TICKS(left / 1000 + 1)) <= 0)
             break;
         if (byte == '\n' || byte == '\r')
             done = length > 0;
@@ -162,11 +210,13 @@ static bool gpsp_console_read_line(char *line, size_t size, uint32_t wait_ms)
             length = 0;
         else if (length + 1 < size)
             line[length++] = (char)byte;
+        else
+            overflow = true;
     }
     line[length] = '\0';
 
-    uart_driver_delete(port);
-    return done;
+    gpsp_console_close();
+    return done && !overflow;
 #else
     (void)line;
     (void)size;

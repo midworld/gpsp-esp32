@@ -1,4 +1,4 @@
-/* Button input from the host viewer over the console UART.
+/* Button input from the host viewer over the console UART or USB Serial/JTAG.
  *
  * Copyright (C) 2026 Midworld Kim
  * SPDX-License-Identifier: GPL-3.0-or-later
