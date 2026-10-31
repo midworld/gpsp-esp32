@@ -224,6 +224,15 @@ menu "gpSP SD card"
         range -1 4
         default 4
 
+    config GPSP_SD_SINGLE_BLOCK_WRITES
+        bool "Write the SD card one block at a time"
+        depends on GPSP_SD_CARD && !ESPEMU
+        default n
+        help
+            Card writes use single-block commands from boot, without the stop
+            command of multi-block writes. Otherwise this starts after the
+            first timed-out multi-block write and lasts until a restart.
+
 endmenu
 
 menu "gpSP performance"

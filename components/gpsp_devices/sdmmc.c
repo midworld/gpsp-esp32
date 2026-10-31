@@ -6,10 +6,14 @@
 #include "gpsp_hardware.h"
 #include "sdkconfig.h"
 #if CONFIG_GPSP_SD_CARD
+#include <inttypes.h>
+#include <string.h>
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "diskio_impl.h"
 #include "diskio_sdmmc.h"
 #include "driver/sdmmc_host.h"
+#include "esp_private/sd_host_private.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "sdmmc_cmd.h"
 #include "esp_timer.h"
@@ -25,6 +29,14 @@ static const char *s_path;
 static sdmmc_card_t *s_sd_card;
 #if CONFIG_GPSP_SD_LDO_CHAN >= 0
 static sd_pwr_ctrl_handle_t s_sd_power;
+#endif
+/* Under the FatFs volume lock: set by a failed recovery */
+static bool s_card_failed;
+/* Under the FatFs volume lock: multi-block writes are not used */
+#if CONFIG_GPSP_SD_SINGLE_BLOCK_WRITES
+static bool s_single_writes = true;
+#else
+static bool s_single_writes;
 #endif
 
 #if CONFIG_GPSP_DCACHE_AUTOLOAD
@@ -78,6 +90,175 @@ static esp_err_t gpsp_sd_do_transaction(int slot, sdmmc_command_t *cmd)
     return result;
 }
 #endif
+
+/* IDF v6.1 legacy host (legacy/src/sdmmc_internal.h) */
+sd_host_slot_handle_t sdmmc_get_slot_handle(int slot_id);
+
+/* After a timed-out data transfer IDF only stops the DMA: the controller
+   keeps its data state and every later command times out. Resets the
+   controller under the host's lock (the ESP-Hosted slot waits and keeps its
+   bus settings), then initializes the card in a new object. The card object
+   is replaced only by the same card. */
+static esp_err_t sd_recover(sdmmc_card_t *card)
+{
+    static sdmmc_card_t fresh;
+    int own_slot = card->host.slot;
+    sd_host_slot_handle_t handle = sdmmc_get_slot_handle(own_slot);
+    if (!handle)
+        return ESP_ERR_INVALID_STATE;
+    sd_host_sdmmc_ctlr_t *ctlr = __containerof(handle, sd_host_sdmmc_slot_t, drv)->ctlr;
+    sdmmc_dev_t *dev = ctlr->hal.dev;
+    const uint32_t sdio = SDMMC_INTMASK_IO_SLOT0 | SDMMC_INTMASK_IO_SLOT1;
+    esp_err_t result = ESP_ERR_TIMEOUT;
+
+    xSemaphoreTake(ctlr->mutex, portMAX_DELAY);
+    /* The controller state the timeout left (cmd holds the last command) */
+    ESP_LOGW(TAG, "SD before reset: cmd %08" PRIx32 " status %08" PRIx32
+            " rintsts %08" PRIx32 " tcbcnt %08" PRIx32 " tbbcnt %08" PRIx32,
+            dev->cmd.val, dev->status.val, dev->rintsts.val,
+            dev->tcbcnt.val, dev->tbbcnt.val);
+    sdmmc_ll_reset_controller(dev);
+    sdmmc_ll_reset_dma(dev);
+    sdmmc_ll_reset_fifo(dev);
+    int64_t end = esp_timer_get_time() + SD_HOST_SDMMC_RESET_TIMEOUT_US;
+    bool reset;
+    while (!(reset = sdmmc_ll_is_controller_reset_done(dev) &&
+            sdmmc_ll_is_dma_reset_done(dev) && sdmmc_ll_is_fifo_reset_done(dev)) &&
+            esp_timer_get_time() < end)
+        vTaskDelay(1);
+    if (reset)
+    {
+        /* SDIO interrupts of the other slot stay pending. */
+        sdmmc_ll_clear_interrupt(dev, ~sdio);
+        sdmmc_ll_init_dma(dev);
+        xQueueReset(ctlr->event_queue);
+        /* The card's slot starts as after its slot init: 1 bit at the
+           probing clock until the card init sets them. */
+        sd_host_sdmmc_slot_t *own = ctlr->slot[own_slot];
+        own->width.width_state = SD_HOST_SLOT_STATE_INIT;
+        own->freq.freq_state = SD_HOST_SLOT_STATE_INIT;
+        /* The other slot's clock goes to the controller again at its rate. */
+        result = ESP_OK;
+        for (int i = 0; i < SOC_SDMMC_NUM_SLOTS && result == ESP_OK; i++)
+            if (i != own_slot && ctlr->slot[i] &&
+                    ctlr->slot[i]->freq.freq_state == SD_HOST_SLOT_STATE_READY)
+                result = sd_host_slot_set_card_clk(ctlr->slot[i]);
+    }
+    xSemaphoreGive(ctlr->mutex);
+    if (result != ESP_OK)
+        return result;
+    sdmmc_host_t host = card->host;
+    result = sdmmc_card_init(&host, &fresh);
+    if (result != ESP_OK)
+        return result;
+    if (memcmp(&fresh.cid, &card->cid, sizeof(fresh.cid)) ||
+            fresh.csd.capacity != card->csd.capacity ||
+            fresh.csd.sector_size != card->csd.sector_size)
+        return ESP_ERR_INVALID_RESPONSE;
+    *card = fresh;
+    return ESP_OK;
+}
+
+/* A card read into dst, or a write from src; after a timeout, recovers the
+   card once and tries again. A failed recovery or a second timeout leaves the
+   card unavailable until a restart. */
+static esp_err_t sd_access(void *dst, const void *src, uint32_t sector,
+        uint32_t count)
+{
+    bool write = src != NULL;
+
+    for (int attempt = 0;; attempt++)
+    {
+        if (s_card_failed)
+            return ESP_ERR_INVALID_STATE;
+        esp_err_t result = ESP_OK;
+
+        /* One block at a time (CMD24, no stop command) */
+        if (write && s_single_writes && count > 1)
+            for (uint32_t i = 0; i < count && result == ESP_OK; i++)
+                result = sdmmc_write_sectors(s_sd_card, (const uint8_t *)src +
+                        i * s_sd_card->csd.sector_size, sector + i, 1);
+        else
+            result = write ? sdmmc_write_sectors(s_sd_card, src, sector, count) :
+                    sdmmc_read_sectors(s_sd_card, dst, sector, count);
+        if (result != ESP_ERR_TIMEOUT)
+            return result;
+        if (attempt)
+        {
+            /* The controller may hold the timeout's state again. */
+            s_card_failed = true;
+            ESP_LOGE(TAG, "SD %s timed out again; card unavailable until restart",
+                    write ? "write" : "read");
+            return result;
+        }
+        esp_err_t recovered = sd_recover(s_sd_card);
+        if (recovered != ESP_OK)
+        {
+            s_card_failed = true;
+            ESP_LOGE(TAG, "SD recovery failed: %s; card unavailable until restart",
+                    esp_err_to_name(recovered));
+            return result;
+        }
+        ESP_LOGW(TAG, "SD %s timed out; card initialized again",
+                write ? "write" : "read");
+        if (write && count > 1 && !s_single_writes)
+        {
+            s_single_writes = true;
+            ESP_LOGW(TAG, "SD writes one block at a time until a restart");
+        }
+    }
+}
+
+static DSTATUS sd_status(BYTE pdrv)
+{
+    (void)pdrv;
+    return s_card_failed ? STA_NOINIT : 0;
+}
+
+static DRESULT sd_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
+{
+    (void)pdrv;
+    esp_err_t result = sd_access(buff, NULL, sector, count);
+
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "SD read failed: %s sector=%lu count=%u",
+                esp_err_to_name(result), (unsigned long)sector, count);
+        return RES_ERROR;
+    }
+    return RES_OK;
+}
+
+static DRESULT sd_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
+{
+    (void)pdrv;
+    esp_err_t result = sd_access(NULL, buff, sector, count);
+
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "SD write failed: %s sector=%lu count=%u",
+                esp_err_to_name(result), (unsigned long)sector, count);
+        return RES_ERROR;
+    }
+    return RES_OK;
+}
+
+static DRESULT sd_ioctl(BYTE pdrv, BYTE cmd, void *buff)
+{
+    (void)pdrv;
+    switch (cmd)
+    {
+    case CTRL_SYNC:
+        return RES_OK;
+    case GET_SECTOR_COUNT:
+        *(DWORD *)buff = s_sd_card->csd.capacity;
+        return RES_OK;
+    case GET_SECTOR_SIZE:
+        *(WORD *)buff = s_sd_card->csd.sector_size;
+        return RES_OK;
+    }
+    return RES_ERROR;
+}
 
 /* Slot 0 has fixed pins on the P4. ESP-Hosted may already own the SDMMC
    controller for slot 1; the host init and slot deinit both allow that. */
@@ -135,7 +316,19 @@ bool gpsp_sdmmc_mount(const char *path)
         return false;
     }
 
-    ESP_LOGI(TAG, "SD card mounted: %s", s_sd_card->cid.name);
+    /* Replaces the IDF disk functions of this drive; FatFs's volume lock
+       keeps one access at a time. */
+    static const ff_diskio_impl_t impl = {
+        .init = sd_status,
+        .status = sd_status,
+        .read = sd_read,
+        .write = sd_write,
+        .ioctl = sd_ioctl,
+    };
+    s_card_failed = false;
+    ff_diskio_register(ff_diskio_get_pdrv_card(s_sd_card), &impl);
+    ESP_LOGI(TAG, "SD card mounted: %s%s", s_sd_card->cid.name,
+            s_single_writes ? ", single-block writes" : "");
     return true;
 }
 
