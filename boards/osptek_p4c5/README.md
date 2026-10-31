@@ -54,6 +54,7 @@
 | C5 SDIO D0-D3 / CLK / CMD / reset | 14-17 / 18 / 19 / 54 |
 
 - SD card power is supplied by the carrier's 3.3 V rail.
+- SD writes use single-block commands; multi-block writes time out now and then.
 - A timed-out SD read or write resets the controller, initializes the card
   again, and runs once more. If that fails, the card is unavailable until a
   restart.
