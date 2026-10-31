@@ -767,9 +767,12 @@ esp_err_t gpsp_storage_use_requested_rom(void)
 {
     if (s_restart.magic != GPSP_RESTART_MAGIC)
         return ESP_ERR_NOT_FOUND;
-    s_restart.magic = 0;
     s_restart.path[sizeof(s_restart.path) - 1] = '\0';
-    return gpsp_storage_set_rom(s_restart.path, s_restart.skip_auto_load);
+    esp_err_t result = gpsp_storage_set_rom(s_restart.path,
+            s_restart.skip_auto_load);
+    if (result == ESP_OK)
+        s_restart.magic = 0;
+    return result;
 }
 
 esp_err_t gpsp_storage_set_rom(const char *path, bool skip_auto_load)

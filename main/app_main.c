@@ -110,14 +110,19 @@ void app_main(void)
             ESP_LOGI(TAG, "Restarting into the chosen ROM");
             esp_restart();
         }
-        /* A ROM picked from the game list starts in place. A ROM gone since
-           then brings the game list back. */
+        /* A ROM picked from the game list starts in place. When it cannot
+           be opened, a restart tries it with the card mounted again; a ROM
+           gone since then brings the game list back there. */
         if (!gpsp_storage_rom_requested())
             break;
         ESP_LOGI(TAG, "Switching to the chosen ROM");
-        if (gpsp_storage_use_requested_rom() != ESP_OK &&
-                gpsp_pick_rom() != ESP_OK)
-            break;
+        if (gpsp_storage_use_requested_rom() != ESP_OK)
+        {
+            gpsp_storage_unmount();
+            gpsp_board_shutdown();
+            ESP_LOGI(TAG, "Restarting into the chosen ROM");
+            esp_restart();
+        }
         switched = true;
 #else
         break;

@@ -55,7 +55,8 @@ esp_err_t gpsp_storage_set_rom(const char *path, bool skip_auto_load);
 /** True while the SD card is mounted. */
 bool gpsp_storage_card(void);
 
-/** Use the ROM asked for by gpsp_storage_request_rom(). */
+/** Use the ROM asked for by gpsp_storage_request_rom(); on failure the
+    request stays for a restart. */
 esp_err_t gpsp_storage_use_requested_rom(void);
 
 /** Start a card ROM after the running one, or after a software restart. */
