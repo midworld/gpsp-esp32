@@ -96,6 +96,9 @@ uint32_t gpsp_board_input_read(void);
 /* Gameplay maps physical buttons before merging the fixed touch buttons. */
 uint32_t gpsp_board_input_read_physical(void);
 uint32_t gpsp_board_virtual_input(void);
+/* Touch buttons pressed since the last call, for the input loop that runs
+   (game or a menu); taps between two reads are not held together. */
+uint32_t gpsp_board_virtual_pressed(void);
 bool gpsp_board_virtual_pad_available(void);
 bool gpsp_board_virtual_pad_enabled(void);
 void gpsp_board_set_virtual_pad(bool enabled);

@@ -5,5 +5,7 @@
 - Checks fixed logical buttons, diagonals, A/B sliding, group capture,
   multiple contacts, cancellation, and release before re-entry.
 - Checks ST7123 report bounds, seven-byte contact stride, and both rotations.
+- Checks short taps, held buttons, cancellation, and physical-only mappings.
+- Checks Home taps and held menu combos with menu and frameskip on or off.
 - Uses address and undefined-behavior sanitizers.
 - Native PPA bounds and border cleanup: `tests/p4-nano-dsi-check`.

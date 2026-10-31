@@ -19,6 +19,8 @@ static i2c_master_dev_handle_t s_device;
 static bool s_bus_ready;
 static atomic_bool s_running, s_ready;
 static atomic_uint s_snapshot;
+/* Buttons pressed since the last gpsp_touch_pressed() */
+static atomic_uint s_pressed;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static struct gpsp_virtual_pad s_pad;
 static void (*s_changed)(void);
@@ -33,7 +35,9 @@ static esp_err_t touch_read(unsigned reg, void *data, size_t bytes)
 static bool touch_publish(void)
 {
     unsigned value = (s_pad.enabled ? GPSP_VIRTUAL_PAD_VISIBLE : 0) | s_pad.buttons;
-    return atomic_exchange_explicit(&s_snapshot, value, memory_order_relaxed) != value;
+    unsigned old = atomic_exchange_explicit(&s_snapshot, value, memory_order_relaxed);
+    atomic_fetch_or_explicit(&s_pressed, value & ~old & 0x1ffff, memory_order_relaxed);
+    return old != value;
 }
 
 static void touch_task(void *arg)
@@ -171,10 +175,16 @@ bool gpsp_touch_available(void) { return atomic_load(&s_ready); }
 uint32_t gpsp_touch_read(void) { return atomic_load_explicit(&s_snapshot, memory_order_relaxed); }
 bool gpsp_touch_enabled(void) { return (gpsp_touch_read() & GPSP_VIRTUAL_PAD_VISIBLE) != 0; }
 
+uint32_t gpsp_touch_pressed(void)
+{
+    return atomic_exchange_explicit(&s_pressed, 0, memory_order_relaxed);
+}
+
 void gpsp_touch_set_enabled(bool enabled)
 {
     portENTER_CRITICAL(&s_lock);
     gpsp_virtual_pad_enable(&s_pad, enabled && gpsp_touch_available());
+    atomic_store_explicit(&s_pressed, 0, memory_order_relaxed);
     bool changed = touch_publish();
     portEXIT_CRITICAL(&s_lock);
     if (changed && s_changed)
@@ -185,6 +195,7 @@ void gpsp_touch_cancel(void)
 {
     portENTER_CRITICAL(&s_lock);
     gpsp_virtual_pad_cancel(&s_pad);
+    atomic_store_explicit(&s_pressed, 0, memory_order_relaxed);
     bool changed = touch_publish();
     portEXIT_CRITICAL(&s_lock);
     if (changed && s_changed)

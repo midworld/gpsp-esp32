@@ -1373,8 +1373,9 @@ static uint32_t gpsp_input_map(uint32_t input)
 #endif
 
 #if CONFIG_GPSP_MENU
-/* Track button edges even while requests wait for all buttons to be up. */
-static bool gpsp_menu_requested(uint32_t input)
+/* Track button edges even while requests wait for all buttons to be up.
+   Taps since the last poll press Home; the combo needs held buttons. */
+static bool gpsp_menu_requested(uint32_t input, uint32_t tapped)
 {
     const uint32_t combo = (1u << RETRO_DEVICE_ID_JOYPAD_SELECT) |
             (1u << RETRO_DEVICE_ID_JOYPAD_START);
@@ -1382,7 +1383,7 @@ static bool gpsp_menu_requested(uint32_t input)
 
     s_input_prev = input;
     return !s_input_blocked &&
-            (((input & ~prev) & GPSP_BOARD_INPUT_HOME) ||
+            ((((input & ~prev) | tapped) & GPSP_BOARD_INPUT_HOME) ||
                     ((input & combo) == combo && (prev & combo) != combo));
 }
 #endif
@@ -1391,25 +1392,29 @@ static void gpsp_input_poll(void)
 {
     uint32_t input = gpsp_board_input_read_physical();
     uint32_t touch = gpsp_board_virtual_input();
+    uint32_t tapped = gpsp_board_virtual_pressed();
 
 #if CONFIG_GPSP_MENU
     /* The menu opens after this frame, which already sees no buttons. */
-    if (gpsp_menu_requested(input | touch))
+    if (gpsp_menu_requested(input | touch, tapped))
     {
 #if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
         ESP_LOGI(TAG, "Menu requested input=0x%05x", (unsigned)input);
 #endif
         s_menu_pending = true;
         s_input_blocked = true;
+        tapped = 0;
 #if GPSP_FRAMESKIP
         s_fast_forward = false;
 #endif
     }
     if (s_input_blocked && (input | touch))
-        input = touch = 0;
+        input = touch = tapped = 0;
     else
         s_input_blocked = false;
 #endif
+    /* A tap between two polls shows for one frame. */
+    touch |= tapped;
 #if CONFIG_GPSP_BENCHMARK
     input |= CONFIG_GPSP_BENCHMARK_HOLD_BUTTONS;
 #endif

@@ -246,9 +246,20 @@ uint32_t gpsp_board_virtual_input(void)
 #endif
 }
 
+uint32_t gpsp_board_virtual_pressed(void)
+{
+#if CONFIG_GPSP_LCD_DSI
+    return gpsp_touch_pressed();
+#else
+    return 0;
+#endif
+}
+
 uint32_t gpsp_board_input_read(void)
 {
-    return gpsp_board_input_read_physical() | gpsp_board_virtual_input();
+    /* A tap between two reads counts once. */
+    return gpsp_board_input_read_physical() | gpsp_board_virtual_input() |
+            gpsp_board_virtual_pressed();
 }
 
 bool gpsp_board_virtual_pad_available(void)

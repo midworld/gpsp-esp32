@@ -16,5 +16,7 @@ void gpsp_touch_set_enabled(bool enabled);
 void gpsp_touch_cancel(void);
 /* One atomic snapshot: visibility in bit 31, logical buttons in bits 0..16. */
 uint32_t gpsp_touch_read(void);
+/* Bits 0..16 pressed since the last call */
+uint32_t gpsp_touch_pressed(void);
 
 #endif
