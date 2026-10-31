@@ -22,8 +22,9 @@
 
 #define BUTTON(name) (1u << RETRO_DEVICE_ID_JOYPAD_##name)
 static atomic_uint s_opacity = 25;
+/* One picture per region, in the native orientation; a press changes only
+   the fill color of its part. */
 static uint32_t *s_tiles[GPSP_PAD_REGIONS];
-static uint32_t *s_art[GPSP_PAD_REGIONS][2];
 static uint32_t s_masks[GPSP_PAD_REGIONS];
 static const uint32_t s_region_masks[GPSP_PAD_REGIONS] = {
     BUTTON(SELECT), BUTTON(START), GPSP_VIRTUAL_PAD_HOME, BUTTON(L), BUTTON(R),
@@ -129,38 +130,41 @@ static void pad_build(unsigned region, uint32_t mask)
     s_masks[region] = mask;
 }
 
+/* One picture per region */
+size_t gpsp_dsi_pad_bytes(void)
+{
+    size_t bytes = 0;
+
+    for (unsigned i = 0; i < GPSP_PAD_REGIONS; i++)
+        bytes += (size_t)gpsp_pad_rects[i].width * gpsp_pad_rects[i].height *
+                sizeof(uint32_t);
+    return bytes;
+}
+
 static esp_err_t pad_prepare(void)
 {
     for (unsigned i = 0; i < GPSP_PAD_REGIONS; i++)
     {
         const struct gpsp_pad_rect *r = &gpsp_pad_rects[i];
-        size_t bytes = r->width * r->height * sizeof(uint32_t);
-        for (unsigned pressed = 0; pressed < 2; pressed++)
-        {
-            s_art[i][pressed] = heap_caps_aligned_alloc(64, bytes,
-                    MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-            if (!s_art[i][pressed])
-                return ESP_ERR_NO_MEM;
-            s_tiles[i] = s_art[i][pressed];
-            pad_build(i, pressed ? s_region_masks[i] : 0);
-        }
-        if (i >= GPSP_PAD_DPAD)
-        {
-            s_tiles[i] = heap_caps_aligned_alloc(64, bytes,
-                    MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-            if (!s_tiles[i])
-                return ESP_ERR_NO_MEM;
-            memcpy(s_tiles[i], s_art[i][0], bytes);
-        }
-        else
-            s_tiles[i] = s_art[i][0];
-        s_masks[i] = 0;
+        s_tiles[i] = heap_caps_aligned_alloc(64, r->width * r->height * sizeof(uint32_t),
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+        if (!s_tiles[i])
+            return ESP_ERR_NO_MEM;
+        pad_build(i, 0);
     }
     return ESP_OK;
 }
 
-/* Copy only the arm or face-button half whose state changed. */
-static void pad_copy(unsigned region, bool pressed,
+/* The fill color of one part, released to pressed or back; borders and
+   text keep theirs. */
+static inline void pad_fill(uint32_t *pixel, bool pressed)
+{
+    if (*pixel == pad_color(!pressed, false))
+        *pixel = pad_color(pressed, false);
+}
+
+/* Only the arm or face-button half whose state changed. */
+static void pad_recolor(unsigned region, bool pressed,
         unsigned x, unsigned y, unsigned width, unsigned height)
 {
     const struct gpsp_pad_rect *r = &gpsp_pad_rects[region];
@@ -169,33 +173,34 @@ static void pad_copy(unsigned region, bool pressed,
 #else
     unsigned px = y, py = r->width - x - width;
 #endif
-    unsigned offset = py * r->height + px;
-    const uint32_t *source = s_art[region][pressed] + offset;
-    uint32_t *dest = s_tiles[region] + offset;
-    if (height == r->height)
-        memcpy(dest, source, width * height * sizeof(uint32_t));
-    else
-        for (unsigned row = 0; row < width; row++)
-            memcpy(dest + row * r->height, source + row * r->height,
-                    height * sizeof(uint32_t));
+    uint32_t *row = s_tiles[region] + py * r->height + px;
+
+    for (unsigned i = 0; i < width; i++, row += r->height)
+        for (unsigned j = 0; j < height; j++)
+            pad_fill(&row[j], pressed);
 }
 
 static void pad_update(unsigned region, uint32_t mask)
 {
     uint32_t changed = s_masks[region] ^ mask;
+    const struct gpsp_pad_rect *r = &gpsp_pad_rects[region];
+
     if (region < GPSP_PAD_DPAD)
-        s_tiles[region] = s_art[region][mask != 0];
+    {
+        if (changed)
+            pad_recolor(region, mask != 0, 0, 0, r->width, r->height);
+    }
     else if (region == GPSP_PAD_AB)
     {
-        if (changed & BUTTON(A)) pad_copy(region, mask & BUTTON(A), 116, 0, 116, 206);
-        if (changed & BUTTON(B)) pad_copy(region, mask & BUTTON(B), 0, 0, 116, 206);
+        if (changed & BUTTON(A)) pad_recolor(region, mask & BUTTON(A), 116, 0, 116, 206);
+        if (changed & BUTTON(B)) pad_recolor(region, mask & BUTTON(B), 0, 0, 116, 206);
     }
     else
     {
-        if (changed & BUTTON(UP)) pad_copy(region, mask & BUTTON(UP), 72, 0, 72, 72);
-        if (changed & BUTTON(DOWN)) pad_copy(region, mask & BUTTON(DOWN), 72, 144, 72, 72);
-        if (changed & BUTTON(LEFT)) pad_copy(region, mask & BUTTON(LEFT), 0, 72, 72, 72);
-        if (changed & BUTTON(RIGHT)) pad_copy(region, mask & BUTTON(RIGHT), 144, 72, 72, 72);
+        if (changed & BUTTON(UP)) pad_recolor(region, mask & BUTTON(UP), 72, 0, 72, 72);
+        if (changed & BUTTON(DOWN)) pad_recolor(region, mask & BUTTON(DOWN), 72, 144, 72, 72);
+        if (changed & BUTTON(LEFT)) pad_recolor(region, mask & BUTTON(LEFT), 0, 72, 72, 72);
+        if (changed & BUTTON(RIGHT)) pad_recolor(region, mask & BUTTON(RIGHT), 144, 72, 72, 72);
     }
     s_masks[region] = mask;
 }
@@ -345,12 +350,7 @@ void gpsp_dsi_pad_shutdown(void)
 {
     for (unsigned i = 0; i < GPSP_PAD_REGIONS; i++)
     {
-        if (i >= GPSP_PAD_DPAD && s_tiles[i] != s_art[i][0] &&
-                s_tiles[i] != s_art[i][1])
-            heap_caps_free(s_tiles[i]);
-        heap_caps_free(s_art[i][0]);
-        heap_caps_free(s_art[i][1]);
-        s_art[i][0] = s_art[i][1] = NULL;
+        heap_caps_free(s_tiles[i]);
         s_tiles[i] = NULL;
     }
 }

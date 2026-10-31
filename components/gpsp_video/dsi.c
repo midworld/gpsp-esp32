@@ -655,7 +655,11 @@ static esp_err_t dsi_draw(const uint16_t *pixels, bool ui,
     {
         s_pad_opacity[s_next] = 0;
         gpsp_touch_set_enabled(false);
-        ESP_LOGW(TAG, "Virtual pad disabled: %s", esp_err_to_name(pad_result));
+        ESP_LOGW(TAG, "Virtual pad disabled: %s; needs %u KiB, PSRAM free %u KiB, "
+                "largest %u KiB", esp_err_to_name(pad_result),
+                (unsigned)(gpsp_dsi_pad_bytes() / 1024),
+                (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+                (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
     }
     else
     {

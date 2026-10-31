@@ -142,8 +142,10 @@ static void gpsp_lcd_ui_layers_fail(esp_err_t result)
     gpsp_lcd_ui_layers_free();
     s_ui_layer_failed = true;
     gpsp_touch_set_enabled(false);
-    ESP_LOGW(TAG, "Menu layers unavailable; virtual pad disabled: %s",
-            esp_err_to_name(result));
+    ESP_LOGW(TAG, "Menu layers unavailable; virtual pad disabled: %s; "
+            "PSRAM free %u KiB, largest %u KiB", esp_err_to_name(result),
+            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+            (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
 }
 #endif
 /* The UI canvas is centered on the panel; a smaller panel crops it. */

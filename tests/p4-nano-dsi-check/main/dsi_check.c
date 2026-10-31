@@ -227,6 +227,59 @@ static void check_pad_crops(void)
             checked);
 }
 
+/* After any sequence of presses, a region's tile equals the one drawn from
+   scratch for its buttons. */
+static void check_pad_pictures(void)
+{
+    unsigned checked = 0;
+
+    assert(s_tiles[0]);
+    for (unsigned region = 0; region < GPSP_PAD_REGIONS; region++)
+    {
+        const struct gpsp_pad_rect *r = &gpsp_pad_rects[region];
+        size_t bytes = r->width * r->height * sizeof(uint32_t);
+        uint32_t *want = malloc(bytes);
+        uint32_t bits[8], masks[257];
+        unsigned n = 0, count = 0;
+
+        assert(want);
+        for (unsigned b = 0; b < 32; b++)
+            if (s_region_masks[region] & 1u << b)
+                bits[n++] = 1u << b;
+        /* Gray code: each step changes one button, then back to none. */
+        for (unsigned g = 0; g < 1u << n; g++)
+        {
+            unsigned gray = g ^ g >> 1;
+            masks[count] = 0;
+            for (unsigned b = 0; b < n; b++)
+                if (gray & 1u << b)
+                    masks[count] |= bits[b];
+            count++;
+        }
+        masks[count++] = 0;
+        for (unsigned i = 0; i < count; i++)
+        {
+            pad_build(region, masks[i]);
+            memcpy(want, s_tiles[region], bytes);
+            pad_build(region, 0);
+            for (unsigned k = 0; k <= i; k++)
+                pad_update(region, masks[k]);
+            assert(s_masks[region] == masks[i]);
+            assert(!memcmp(want, s_tiles[region], bytes));
+            if (i)
+            {
+                pad_build(region, masks[i - 1]);
+                pad_update(region, masks[i]);
+                assert(!memcmp(want, s_tiles[region], bytes));
+            }
+            checked++;
+        }
+        pad_build(region, 0);
+        free(want);
+    }
+    printf("DSI_CHECK pad pictures: %u masks, recolored tiles match pass\n", checked);
+}
+
 static void check_virtual_pad(uint16_t *input, uint16_t *ui)
 {
     uint16_t *baseline = heap_caps_malloc(DSI_BYTES, MALLOC_CAP_SPIRAM);
@@ -382,6 +435,16 @@ static void check_menu_layers(uint16_t *ui)
     uint16_t *below = heap_caps_malloc(DSI_BYTES, MALLOC_CAP_SPIRAM);
     assert(below);
     gpsp_dsi_set_pad_opacity(100);
+    /* First enable from a menu drawn while the pad was off. */
+    s_test_touch = 0;
+    gpsp_ui_backdrop(ui, NULL);
+    gpsp_ui_fill(ui, 270, 190, 12, 12, 0xf800);
+    gpsp_lcd_ui_draw(0, 240);
+    assert(landscape_pixel(last_frame(), 626, 396) == 0xf800);
+    s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE;
+    gpsp_lcd_ui_draw(0, 240);
+    assert(landscape_pixel(last_frame(), 626, 396) == 0xf800);
+    assert(landscape_pixel(last_frame(), 0, 346) != 0);
     gpsp_ui_backdrop(ui, NULL);
     s_test_touch = GPSP_VIRTUAL_PAD_VISIBLE;
     gpsp_lcd_ui_draw(0, 240);
@@ -944,6 +1007,7 @@ static void display_check(void *arg)
     check_sram_hud();
 #endif
     check_pad_crops();
+    check_pad_pictures();
     check_virtual_pad(input, ui);
 #if CONFIG_DSI_CHECK_MODEL
     check_menu_allocations(&ui);
