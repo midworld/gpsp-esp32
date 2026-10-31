@@ -71,6 +71,13 @@ idf.py -B build-osptek -p PORT flash monitor
 - OSPTEK touch controls work in games and menus. Enable Virtual Pad in
   Settings, or double-tap the screen while it is off. Pad opacity is
   25%, 50%, or 100%; physical button mappings remain independent.
+
+  ![OSPTEK P4C5 touch controls](docs/images/touch-controls.png)
+
+  Test-model render, with A and Right pressed at 100% pad opacity.
+  [2048 Advance](https://basil-termini.itch.io/2048-advance) by Basil Termini
+  ([CC0 1.0](https://github.com/Paperdomo101/2048-GBA/blob/ae36800dfa1314f96c4c8785b5c2d077fb731aff/LICENSE)).
+
 - DSI output offers Nearest, Bilinear, and LCD Grid filters, an optional
   GBA color profile, and Off/Simple/Full Stats modes.
 - The menu saves mute separately from volume. OSPTEK enables a 300 Hz
