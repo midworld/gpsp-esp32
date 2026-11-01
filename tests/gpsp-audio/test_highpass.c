@@ -14,7 +14,10 @@
 #define BLOCK 352u
 #define PI 3.14159265358979323846
 
-static void test_response(void)
+/* The cutoffs the build accepts: 100 to 1000 Hz. */
+static const unsigned s_cutoffs[] = {100, 300, 1000};
+
+static void test_response(unsigned cutoff)
 {
     static const unsigned frequencies[] = {100, 150, 300, 1000, 4000};
     int16_t samples[BLOCK];
@@ -26,7 +29,7 @@ static void test_response(void)
         double output_power = 0.0;
         unsigned frequency = frequencies[f];
 
-        audio_highpass_init(&filter, RATE, 300);
+        audio_highpass_init(&filter, RATE, cutoff);
         for (unsigned position = 0; position < RATE * 2; position += BLOCK)
         {
             unsigned frames = RATE * 2 - position;
@@ -46,10 +49,10 @@ static void test_response(void)
                     output_power += (double)samples[i] * samples[i];
         }
         double gain = sqrt(output_power / input_power);
-        double ratio = tan(PI * 300 / RATE) / tan(PI * frequency / RATE);
+        double ratio = tan(PI * cutoff / RATE) / tan(PI * frequency / RATE);
         double expected = 1.0 / sqrt(1.0 + ratio * ratio * ratio * ratio);
 
-        printf("%u Hz: %.3f dB\n", frequency, 20 * log10(gain));
+        printf("%u Hz cutoff, %u Hz: %.3f dB\n", cutoff, frequency, 20 * log10(gain));
         assert(fabs(gain - expected) < 0.002);
     }
 }
@@ -89,12 +92,12 @@ static void test_continuity(void)
     assert(memcmp(a, b, sizeof(a)) == 0);
 }
 
-static void test_limits(void)
+static void test_limits(unsigned cutoff)
 {
     struct audio_highpass filter;
     int16_t samples[BLOCK];
 
-    audio_highpass_init(&filter, RATE, 300);
+    audio_highpass_init(&filter, RATE, cutoff);
     for (unsigned block = 0; block < 100; block++)
     {
         for (unsigned i = 0; i < BLOCK; i++)
@@ -131,9 +134,12 @@ static void test_bypass(void)
 
 int main(void)
 {
-    test_response();
+    for (unsigned i = 0; i < sizeof(s_cutoffs) / sizeof(s_cutoffs[0]); i++)
+    {
+        test_response(s_cutoffs[i]);
+        test_limits(s_cutoffs[i]);
+    }
     test_continuity();
-    test_limits();
     test_bypass();
     puts("PASS: high-pass response, continuity, reset, clipping and bypass");
     return 0;

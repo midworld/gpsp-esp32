@@ -51,6 +51,7 @@ idf.py -B build-osptek -p PORT flash monitor
 | `CONFIG_GPSP_LCD` | LCD output | On for P4 Nano |
 | `CONFIG_GPSP_MENU` | In-game menu | On when LCD is enabled, except in benchmark builds |
 | `CONFIG_GPSP_AUDIO` | Speaker output | On for P4 Nano |
+| `CONFIG_GPSP_AUDIO_HIGHPASS_HZ` | Speaker high-pass cutoff: 0 (off) or 100 to 1000 Hz | 300 on OSPTEK P4C5 |
 | `CONFIG_GPSP_USB_PAD` | USB gamepad input | On for P4 Nano, except in benchmark builds |
 | `CONFIG_GPSP_USB_BT` | USB Bluetooth adapter and Classic HID gamepads | On for OSPTEK P4C5 |
 | `CONFIG_GPSP_CARTRIDGE_AUTOSAVE` | Cartridge save loading and periodic saving | Off |

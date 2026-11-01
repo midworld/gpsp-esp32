@@ -493,13 +493,15 @@ menu "gpSP audio"
         range -60 0
         default -6
 
-    config GPSP_AUDIO_HIGHPASS
-        bool "300 Hz speaker high-pass filter"
+    config GPSP_AUDIO_HIGHPASS_HZ
+        int "Speaker high-pass cutoff (Hz)"
         depends on GPSP_AUDIO
-        default n
+        range 0 1000
+        default 0
         help
-            Second-order Butterworth high-pass at 300 Hz.
-            Reduce low frequencies for small speakers.
+            Second-order Butterworth high-pass that reduces low frequencies
+            for small speakers. 0 disables it; other values are 100 to
+            1000 Hz.
 
     config GPSP_FRAMESKIP_AUTO
         bool "Skip drawing frames that fall behind"

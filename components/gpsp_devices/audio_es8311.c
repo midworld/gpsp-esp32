@@ -14,7 +14,7 @@
 
 #if CONFIG_GPSP_AUDIO
 
-#if CONFIG_GPSP_AUDIO_HIGHPASS
+#if CONFIG_GPSP_AUDIO_HIGHPASS_HZ
 #include "audio_highpass.h"
 #endif
 
@@ -300,10 +300,10 @@ static void audio_task(void *arg)
     int volume_db = -60;
     unsigned average = 0;
     uint32_t fraction = 0;
-#if CONFIG_GPSP_AUDIO_HIGHPASS
+#if CONFIG_GPSP_AUDIO_HIGHPASS_HZ
     struct audio_highpass highpass;
 
-    audio_highpass_init(&highpass, AUDIO_RATE, 300);
+    audio_highpass_init(&highpass, AUDIO_RATE, CONFIG_GPSP_AUDIO_HIGHPASS_HZ);
 #endif
 
     (void)arg;
@@ -344,7 +344,7 @@ static void audio_task(void *arg)
         }
         if (!playing)
         {
-#if CONFIG_GPSP_AUDIO_HIGHPASS
+#if CONFIG_GPSP_AUDIO_HIGHPASS_HZ
             audio_highpass_reset(&highpass);
 #endif
             atomic_store(&s_smooth_level, level);
@@ -398,7 +398,7 @@ static void audio_task(void *arg)
             fraction = position & 0xffff;
         }
         atomic_store(&s_tail, tail);
-#if CONFIG_GPSP_AUDIO_HIGHPASS
+#if CONFIG_GPSP_AUDIO_HIGHPASS_HZ
         audio_highpass_process(&highpass, block, AUDIO_BLOCK);
 #endif
         audio_send(block, AUDIO_BLOCK);

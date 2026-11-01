@@ -3,7 +3,8 @@
 - ESP32-P4 v3.x, 16 MiB flash, 32 MiB PSRAM, ESP32-C5.
 - CPU clock: 400 MHz; PSRAM clock: 250 MHz.
 - Speaker: 300 Hz second-order Butterworth high-pass at 32,768 Hz.
-  `CONFIG_GPSP_AUDIO_HIGHPASS` controls the filter.
+  `CONFIG_GPSP_AUDIO_HIGHPASS_HZ` sets the cutoff: 0 (off) or 100 to
+  1000 Hz.
 - Light measurement is the default; LCD Stats retains all indicators.
 - `CONFIG_GPSP_PERFORMANCE_DIAGNOSTICS` enables frame checksums, periodic
   JIT/status logs and slow-frame details. DSI phase timing also requires

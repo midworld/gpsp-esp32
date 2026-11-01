@@ -33,7 +33,11 @@ else()
     target_include_directories(${COMPONENT_LIB} SYSTEM PRIVATE "third_party/hid_report_parser")
     set_source_files_properties("third_party/hid_report_parser/hid_report_parser.cpp"
         PROPERTIES COMPILE_OPTIONS "-w")
-    if(CONFIG_GPSP_AUDIO_HIGHPASS)
+    if(CONFIG_GPSP_AUDIO_HIGHPASS_HZ)
+        # Keep nonzero cutoffs in the supported range.
+        if(CONFIG_GPSP_AUDIO_HIGHPASS_HZ LESS 100)
+            message(FATAL_ERROR "CONFIG_GPSP_AUDIO_HIGHPASS_HZ must be 0 or 100 to 1000")
+        endif()
         target_sources(${COMPONENT_LIB} PRIVATE "audio_highpass.c")
     endif()
     if(CONFIG_GPSP_USB_PAD_DIAGNOSTICS)
