@@ -1373,6 +1373,34 @@ static uint32_t gpsp_input_map(uint32_t input)
 #endif
 
 #if CONFIG_GPSP_MENU
+/* Home, with Select and Start as the pad buttons the controls give them. */
+static uint32_t gpsp_menu_buttons(uint32_t input)
+{
+    uint32_t buttons = input & GPSP_BOARD_INPUT_HOME;
+#if GPSP_FRAMESKIP
+    static const struct
+    {
+        enum gpsp_settings_control control;
+        unsigned id;
+    } combo[] = {
+        {GPSP_SETTINGS_CONTROL_SELECT, RETRO_DEVICE_ID_JOYPAD_SELECT},
+        {GPSP_SETTINGS_CONTROL_START, RETRO_DEVICE_ID_JOYPAD_START},
+    };
+
+    for (unsigned i = 0; i < sizeof(combo) / sizeof(combo[0]); i++)
+    {
+        unsigned button = gpsp_settings_control(combo[i].control);
+
+        if (button != GPSP_SETTINGS_BUTTON_NONE && (input & (1u << button)))
+            buttons |= 1u << combo[i].id;
+    }
+#else
+    buttons |= input & ((1u << RETRO_DEVICE_ID_JOYPAD_SELECT) |
+            (1u << RETRO_DEVICE_ID_JOYPAD_START));
+#endif
+    return buttons;
+}
+
 /* Track button edges even while requests wait for all buttons to be up.
    Taps since the last poll press Home; the combo needs held buttons. */
 static bool gpsp_menu_requested(uint32_t input, uint32_t tapped)
@@ -1396,7 +1424,8 @@ static void gpsp_input_poll(void)
 
 #if CONFIG_GPSP_MENU
     /* The menu opens after this frame, which already sees no buttons. */
-    if (gpsp_menu_requested(input | touch, tapped))
+    /* Touch buttons are already the core's buttons. */
+    if (gpsp_menu_requested(gpsp_menu_buttons(input) | touch, tapped))
     {
 #if CONFIG_GPSP_USB_PAD_DIAGNOSTICS
         ESP_LOGI(TAG, "Menu requested input=0x%05x", (unsigned)input);

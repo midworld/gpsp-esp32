@@ -50,14 +50,16 @@ with tempfile.TemporaryDirectory(prefix="gpsp-virtual-pad-") as folder:
             "uint32_t gpsp_board_virtual_pressed(",
             "uint32_t gpsp_board_input_read("),
         "main/gpsp_frontend.c": (
-            "static bool gpsp_menu_requested(", "static void gpsp_input_poll("),
+            "static uint32_t gpsp_menu_buttons(", "static bool gpsp_menu_requested(",
+            "static void gpsp_input_poll("),
     }
     functions = []
     for path, names in sources.items():
         text = (root / path).read_text()
         for name in names:
             function = block(text, name)
-            if name == "static bool gpsp_menu_requested(":
+            if name in ("static uint32_t gpsp_menu_buttons(",
+                        "static bool gpsp_menu_requested("):
                 function = "#if CONFIG_GPSP_MENU\n" + function + "#endif\n"
             functions.append(function)
     (Path(folder) / "touch_input.inc").write_text("\n".join(functions))

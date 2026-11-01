@@ -30,6 +30,23 @@ static uint32_t gpsp_input_map(uint32_t input)
 {
     return (input & ~BUTTON(A)) | (input & BUTTON(A) ? BUTTON(B) : 0);
 }
+
+#if CONFIG_GPSP_MENU
+enum gpsp_settings_control
+{
+    GPSP_SETTINGS_CONTROL_START, GPSP_SETTINGS_CONTROL_SELECT,
+};
+#define GPSP_SETTINGS_BUTTON_NONE (~0u)
+static unsigned s_controls[] = {
+    [GPSP_SETTINGS_CONTROL_START] = RETRO_DEVICE_ID_JOYPAD_START,
+    [GPSP_SETTINGS_CONTROL_SELECT] = RETRO_DEVICE_ID_JOYPAD_SELECT,
+};
+
+static unsigned gpsp_settings_control(enum gpsp_settings_control control)
+{
+    return s_controls[control];
+}
+#endif
 #endif
 
 bool gpsp_touch_available(void) { return true; }
@@ -134,6 +151,36 @@ static void check_menu(void)
     s_physical = 0;
     gpsp_input_poll();
     assert(!s_input_blocked);
+
+#if GPSP_FRAMESKIP
+    /* The combo follows the pad buttons given to Select and Start. */
+    s_controls[GPSP_SETTINGS_CONTROL_SELECT] = RETRO_DEVICE_ID_JOYPAD_L3;
+    s_controls[GPSP_SETTINGS_CONTROL_START] = RETRO_DEVICE_ID_JOYPAD_R3;
+    s_physical = BUTTON(SELECT) | BUTTON(START);
+    gpsp_input_poll();
+    assert(!s_menu_pending);
+    s_physical = BUTTON(L3) | BUTTON(R3);
+    gpsp_input_poll();
+    assert(s_menu_pending && !s_input_state);
+    s_menu_pending = false;
+    s_physical = 0;
+    gpsp_input_poll();
+    /* Without a Start button the pad has no combo; Home still opens it. */
+    s_controls[GPSP_SETTINGS_CONTROL_START] = GPSP_SETTINGS_BUTTON_NONE;
+    s_physical = ~0u & ~GPSP_VIRTUAL_PAD_HOME;
+    gpsp_input_poll();
+    assert(!s_menu_pending);
+    s_physical = 0;
+    gpsp_input_poll();
+    s_physical = GPSP_VIRTUAL_PAD_HOME;
+    gpsp_input_poll();
+    assert(s_menu_pending);
+    s_menu_pending = false;
+    s_physical = 0;
+    gpsp_input_poll();
+    s_controls[GPSP_SETTINGS_CONTROL_SELECT] = RETRO_DEVICE_ID_JOYPAD_SELECT;
+    s_controls[GPSP_SETTINGS_CONTROL_START] = RETRO_DEVICE_ID_JOYPAD_START;
+#endif
 #endif
 }
 
